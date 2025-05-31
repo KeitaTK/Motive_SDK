@@ -471,7 +471,7 @@ class NatNetClient:
                 # データのシリアライズ
                 serialized_data = pickle.dumps(udp_data)
                 # Raspberry Piに送信（IPアドレスを適切に設定）
-                client.sendto(serialized_data, ("192.168.11.50", 15769))
+                client.sendto(serialized_data, ("192.168.11.33", 15769))
                 print(f"UDP sent to Raspberry Pi: {len(serialized_data)} bytes")
             except Exception as e:
                 print(f"UDP send error: {e}")
