@@ -334,17 +334,20 @@ class NatNetClient:
         data_time = now_time - self.time_log
 
         if new_id == 1:
-            self.time_log = now_time
+            # rot は (x, y, z, w) の順序
+            motive_qx = rot[0]  # x成分
+            motive_qy = rot[1]  # y成分  
+            motive_qz = rot[2]  # z成分
+            motive_qw = rot[3]  # w成分
             
-            # Motive座標系からNED座標系に変換
+            # Motive座標系からNED座標系に変換（引数の順序に注意）
             ned_x, ned_y, ned_z, ned_qw, ned_qx, ned_qy, ned_qz = self.motive_to_ned(
-                pos[0], pos[1], pos[2],        # Motive位置
-                rot[0], rot[1], rot[2], rot[3]  # Motiveクオータニオン
+                pos[0], pos[1], pos[2],                    # 位置
+                motive_qx, motive_qy, motive_qz, motive_qw # クオータニオン(x,y,z,w)
             )
             
-            # 変換されたデータをバッファに格納
+            # バッファに格納
             self.data_buffer[rb_num] = (new_id, [ned_x, ned_y, ned_z], [ned_qw, ned_qx, ned_qy, ned_qz], self.data_No, data_time)
-            
             # デバッグ出力
             print(f"Original Motive: pos=({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
             print(f"Converted NED:   pos=({ned_x:.3f}, {ned_y:.3f}, {ned_z:.3f})")
@@ -480,20 +483,29 @@ class NatNetClient:
 
 
     # Motive座標系（X=北,Y=西,Z=下）からNED座標系（X=北,Y=東,Z=下）への変換
-    def motive_to_ned(self, motive_x, motive_y, motive_z, motive_qw, motive_qx, motive_qy, motive_qz):
-        """Motive座標系（X=北,Y=西,Z=下）からNED座標系（X=北,Y=東,Z=下）への変換"""
+    def motive_to_ned(self, motive_x, motive_y, motive_z, motive_qx, motive_qy, motive_qz, motive_qw):
+        """
+        Motive座標系（左手系：X=北,Y=上,Z=東）からNED座標系（右手系：X=北,Y=東,Z=下）への変換
+        注意: Motiveクオータニオンは (x, y, z, w) の順序
+        """
         # 位置変換
-        ned_x = motive_x        # 北→北（そのまま）
-        ned_y = -motive_y       # 西→東（符号反転）
-        ned_z = motive_z        # 下→下（そのまま）
+        ned_x = motive_x        # 北→北
+        ned_y = motive_z        # 東→東  
+        ned_z = -motive_y       # 上→下（符号反転）
         
-        # クオータニオン変換（同じ変換を適用）
-        ned_qw = motive_qw
-        ned_qx = motive_qx      # X軸（北）はそのまま
-        ned_qy = -motive_qy     # Y軸変換に対応
-        ned_qz = motive_qz      # Z軸（下）はそのまま
+        # クオータニオン変換（順序に注意）
+        ned_qw = motive_qw      # w成分
+        ned_qx = motive_qx      # X軸（北）→X軸（北）
+        ned_qy = motive_qz      # Z軸（東）→Y軸（東）
+        ned_qz = -motive_qy     # Y軸（上）→Z軸（下）、符号反転
+        
+        # デバッグ出力
+        print(f"Motive quat (x,y,z,w): ({motive_qx:.6f}, {motive_qy:.6f}, {motive_qz:.6f}, {motive_qw:.6f})")
+        print(f"NED quat (w,x,y,z):    ({ned_qw:.6f}, {ned_qx:.6f}, {ned_qy:.6f}, {ned_qz:.6f})")
         
         return ned_x, ned_y, ned_z, ned_qw, ned_qx, ned_qy, ned_qz
+
+
 
 
     def __unpack_asset( self, data, major, minor, asset_num=0):
