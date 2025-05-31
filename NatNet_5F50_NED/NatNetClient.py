@@ -314,7 +314,7 @@ class NatNetClient:
         offset = 0
 
         # ID (4 bytes)
-        new_id = int.from_bytes( data[offset:offset+4], byteorder='little', signed=True )
+        new_id = int.from_bytes( data[offset:offset+4], byteorder='little',  signed=True )
         offset += 4
 
         trace_mf( "RB: %3.1d ID: %3.1d"% (rb_num, new_id))
@@ -322,48 +322,54 @@ class NatNetClient:
         # Position and orientation
         pos = Vector3.unpack( data[offset:offset+12] )
         offset += 12
-
-        trace_mf( "\tPosition : [%3.2f, %3.2f, %3.2f]"% (pos[0], pos[1], pos[2] ))
+        trace_mf( "\tPosition    : [%3.2f, %3.2f, %3.2f]"% (pos[0], pos[1], pos[2] ))
 
         rot = Quaternion.unpack( data[offset:offset+16] )
         offset += 16
-
         trace_mf( "\tOrientation : [%3.2f, %3.2f, %3.2f, %3.2f]"% (rot[0], rot[1], rot[2], rot[3] ))
 
         now_time = time.perf_counter()
         data_time = now_time - self.time_log
-
         if new_id == 1:
             self.time_log = now_time
-            
-            # Motive座標系からNED座標系に変換
-            ned_x, ned_y, ned_z, ned_qw, ned_qx, ned_qy, ned_qz = self.motive_to_ned(
-                pos[0], pos[1], pos[2],        # Motive位置
-                rot[0], rot[1], rot[2], rot[3]  # Motiveクオータニオン
-            )
-            
-            # 変換されたデータをバッファに格納
-            self.data_buffer[rb_num] = (new_id, [ned_x, ned_y, ned_z], [ned_qw, ned_qx, ned_qy, ned_qz], self.data_No, data_time)
-            
-            # デバッグ出力
-            print(f"Original Motive: pos=({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
-            print(f"Converted NED:   pos=({ned_x:.3f}, {ned_y:.3f}, {ned_z:.3f})")
 
-        # データに番号をつける
+
+
+
+
+        # データをバッファに格納
+        self.data_buffer[rb_num] = (new_id, pos, rot, self.data_No, data_time)
+
+        #   データに番号をつける
         if new_id == 1:
             self.data_No = self.data_No + 1
 
-        # IDが1のデータが確認できたら送信
+        # IDが1と2のデータが揃ったら送信
         if 0 in self.data_buffer:
             self.send_data()
             self.data_buffer.clear()
+
+        print(self.data_buffer)
+
+        # # ここでソケットで送信するこれはテスト用
+        # # data_structure = ("new_id", "pos", "rot")
+
+        # client = socket.socket( socket.AF_INET )
+        # client.connect( ("192.168.12.22", 15769) )
+
+        # data = (new_id, pos, rot)
+
+        # serialized_data = pickle.dumps(data)
+
+        # client.send(serialized_data)
+        # client.close()
+        
 
         rigid_body = MoCapData.RigidBody(new_id, pos, rot)
 
         # Send information to any listener.
         if self.rigid_body_listener is not None:
             self.rigid_body_listener( new_id, pos, rot )
-
 
         # RB Marker Data ( Before version 3.0.  After Version 3.0 Marker data is in description )
         if( major < 3  and major != 0) :
@@ -442,58 +448,36 @@ class NatNetClient:
 
         return offset, skeleton
     
-    # UDPでラズパイにデータを送信
+
+    # def send_data(self):
+    ## TCPソケットで送信
+    #     # バッファのデータをリストにまとめる
+    #     data_list = list(self.data_buffer.values())
+    #     print(data_list)
+
+    #     client = socket.socket(socket.AF_INET)
+
+    #     client.connect(("192.168.11.50", 15769))
+
+    #     serialized_data = pickle.dumps(data_list)
+    #     client.sendall(serialized_data)
+    #     client.close()
+
     def send_data(self):
-        """UDPソケットでNED変換済みデータを送信"""
+        ## UDPソケットで送信
         # バッファのデータをリストにまとめる
         data_list = list(self.data_buffer.values())
-        
-        if data_list:
-            # 最初のデータを取得（通常はID=1のリジッドボディ）
-            rigid_body_data = data_list[0]
-            new_id, ned_pos, ned_quat, data_no, data_time = rigid_body_data
-            
-            # UDPで送信するデータ構造を作成
-            # フォーマット: [x, y, z, qw, qx, qy, qz, timestamp]
-            udp_data = {
-                'id': new_id,
-                'position': ned_pos,        # [ned_x, ned_y, ned_z]
-                'quaternion': ned_quat,     # [ned_qw, ned_qx, ned_qy, ned_qz]
-                'data_no': data_no,
-                'timestamp': time.time()
-            }
-            
-            print(f"Sending NED data: pos={ned_pos}, quat={ned_quat}")
-            
-            # UDPソケットの作成と送信
-            client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                # データのシリアライズ
-                serialized_data = pickle.dumps(udp_data)
-                # Raspberry Piに送信（IPアドレスを適切に設定）
-                client.sendto(serialized_data, ("192.168.11.50", 15769))
-                print(f"UDP sent to Raspberry Pi: {len(serialized_data)} bytes")
-            except Exception as e:
-                print(f"UDP send error: {e}")
-            finally:
-                client.close()
+        print(data_list)
 
-
-    # Motive座標系（X=北,Y=西,Z=下）からNED座標系（X=北,Y=東,Z=下）への変換
-    def motive_to_ned(self, motive_x, motive_y, motive_z, motive_qw, motive_qx, motive_qy, motive_qz):
-        """Motive座標系（X=北,Y=西,Z=下）からNED座標系（X=北,Y=東,Z=下）への変換"""
-        # 位置変換
-        ned_x = motive_x        # 北→北（そのまま）
-        ned_y = -motive_y       # 西→東（符号反転）
-        ned_z = motive_z        # 下→下（そのまま）
+        # UDPソケットの作成
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         
-        # クオータニオン変換（同じ変換を適用）
-        ned_qw = motive_qw
-        ned_qx = motive_qx      # X軸（北）はそのまま
-        ned_qy = -motive_qy     # Y軸変換に対応
-        ned_qz = motive_qz      # Z軸（下）はそのまま
-        
-        return ned_x, ned_y, ned_z, ned_qw, ned_qx, ned_qy, ned_qz
+        try:
+            # データのシリアライズ
+            serialized_data = pickle.dumps(data_list)
+            client.sendto(serialized_data, ("192.168.11.50", 15769))
+        finally:
+            client.close()
 
 
     def __unpack_asset( self, data, major, minor, asset_num=0):
