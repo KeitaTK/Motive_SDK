@@ -170,6 +170,10 @@ if __name__ == "__main__":
     streaming_client.new_frame_listener = receive_new_frame
     streaming_client.rigid_body_listener = receive_rigid_body_frame
 
+    print("Starting Motive to NED conversion and UDP transmission...")
+    print("Target Raspberry Pi: 192.168.11.50:15769")
+    print("Coordinate conversion: Motive(X=North,Y=West,Z=Down) -> NED(X=North,Y=East,Z=Down)")
+
     # Start up the streaming client now that the callbacks are set up.
     # This will run perpetually, and operate on a separate thread.
     is_running = streaming_client.run()
@@ -201,14 +205,3 @@ if __name__ == "__main__":
 
     thre = threading.Thread( target = q_stop)
     thre.start()
-
-
-
-    # while is_looping:
-    #     time.sleep(1)
-    #     print(new_id)
-    #     print(pos)
-    #     print(rot)
-
-
-
