@@ -96,6 +96,8 @@ class NatNetClient:
         self.data_buffer = {}
         self.data_No = 0
         self.time_log = 0
+        # 原点設定用の変数を追加
+        self.origin = None
 
 
     # Client/server message ids
@@ -334,23 +336,33 @@ class NatNetClient:
         data_time = now_time - self.time_log
 
         if new_id == 1:
+            # 原点設定と相対位置計算を追加
+            if not self.origin:
+                self.origin = [pos[0], pos[1], pos[2]]
+                print(f"Origin set to: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
+
+            # 相対位置を計算
+            rel_x = pos[0] - self.origin[0]
+            rel_y = pos[1] - self.origin[1]
+            rel_z = pos[2] - self.origin[2]
+
             # rot は (x, y, z, w) の順序
-            motive_qx = rot[0]  # x成分
-            motive_qy = rot[1]  # y成分  
-            motive_qz = rot[2]  # z成分
-            motive_qw = rot[3]  # w成分
-            
-            # Motive座標系からNED座標系に変換（引数の順序に注意）
+            motive_qx = rot[0] # x成分
+            motive_qy = rot[1] # y成分
+            motive_qz = rot[2] # z成分
+            motive_qw = rot[3] # w成分
+
+            # 相対位置を使ってMotive座標系からNED座標系に変換
             ned_x, ned_y, ned_z, ned_qw, ned_qx, ned_qy, ned_qz = self.motive_to_ned(
-                pos[0], pos[1], pos[2],                    # 位置
+                rel_x, rel_y, rel_z, # 相対位置を使用
                 motive_qx, motive_qy, motive_qz, motive_qw # クオータニオン(x,y,z,w)
             )
-            
-            # バッファに格納
-            self.data_buffer[rb_num] = (new_id, [ned_x, ned_y, ned_z], [ned_qw, ned_qx, ned_qy, ned_qz], self.data_No, data_time)
-            # デバッグ出力
+
+            # デバッグ出力を更新
             print(f"Original Motive: pos=({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
-            print(f"Converted NED:   pos=({ned_x:.3f}, {ned_y:.3f}, {ned_z:.3f})")
+            print(f"Relative pos: ({rel_x:.3f}, {rel_y:.3f}, {rel_z:.3f})")
+            print(f"Converted NED: pos=({ned_x:.3f}, {ned_y:.3f}, {ned_z:.3f})")
+
 
         # データに番号をつける
         if new_id == 1:
@@ -474,7 +486,7 @@ class NatNetClient:
                 # データのシリアライズ
                 serialized_data = pickle.dumps(udp_data)
                 # Raspberry Piに送信（IPアドレスを適切に設定）
-                client.sendto(serialized_data, ("192.168.11.33", 15769))
+                client.sendto(serialized_data, ("192.168.11.50", 15769))
                 print(f"UDP sent to Raspberry Pi: {len(serialized_data)} bytes")
             except Exception as e:
                 print(f"UDP send error: {e}")
