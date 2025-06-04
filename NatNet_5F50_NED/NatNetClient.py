@@ -7,6 +7,9 @@ import time
 import DataDescriptions
 import MoCapData
 import pickle
+import math
+import pyned2lla
+
 
 def trace( *args ):
     # uncomment the one you want to use
@@ -98,6 +101,21 @@ class NatNetClient:
         self.time_log = 0
         # 原点設定用の変数を追加
         self.origin = None
+
+        # **GPS変換用の高精度設定**
+        self.D2R = math.pi / 180.0        # 度→ラジアン変換
+        self.R2D = 180.0 / math.pi        # ラジアン→度変換
+        self.wgs84 = pyned2lla.wgs84()    # WGS84楕円体
+        
+        # **0補完済みの基準GPS座標（指定値）**
+        self.ref_lat = 36.07578000        # 緯度（8桁精度）
+        self.ref_lon = 136.21329000       # 経度（8桁精度）
+        self.ref_alt = 0.000              # 高度（3桁精度）
+        
+        # **精度設定**
+        self.gps_precision = 8            # 小数点以下8桁（0.1cmオーダー）
+        
+        print(f"GPS reference initialized: ({self.ref_lat:.8f}, {self.ref_lon:.8f}, {self.ref_alt:.3f})")
 
 
     # Client/server message ids
@@ -358,15 +376,29 @@ class NatNetClient:
                 motive_qx, motive_qy, motive_qz, motive_qw # クオータニオン(x,y,z,w)
             )
 
-            # バッファに格納
-            self.data_buffer[rb_num] = (new_id, [ned_x, ned_y, ned_z], [ned_qw, ned_qx, ned_qy, ned_qz], self.data_No, data_time)
+            # **追加：高精度GPS座標変換（0.1cmオーダー対応）**
+            gps_lat, gps_lon, gps_alt = self.ned_to_gps(ned_x, ned_y, ned_z)
+            
+            if gps_lat is not None:
+                # **高精度GPS情報の統一フォーマット表示**
+                print(f"GPS: lat={gps_lat:.8f}, lon={gps_lon:.8f}, alt={gps_alt:.3f}")
+                
+                # **バッファにGPS情報も追加（拡張データ構造）**
+                self.data_buffer[rb_num] = (
+                    new_id, 
+                    [ned_x, ned_y, ned_z],           # NED位置
+                    [ned_qw, ned_qx, ned_qy, ned_qz], # NED姿勢
+                    [gps_lat, gps_lon, gps_alt],     # 高精度GPS座標
+                    self.data_No, 
+                    data_time
+                )
+            else:
+                # GPS変換失敗時は従来のデータ構造
+                print(f"ERROR: GPS conversion failed for NED=({ned_x:.3f}, {ned_y:.3f}, {ned_z:.3f})")
+                self.data_buffer[rb_num] = (new_id, [ned_x, ned_y, ned_z], [ned_qw, ned_qx, ned_qy, ned_qz], self.data_No, data_time)
 
-
-            # デバッグ出力を更新
-            print(f"Original Motive: pos=({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
-            print(f"Relative pos: ({rel_x:.3f}, {rel_y:.3f}, {rel_z:.3f})")
+            # **デバッグ出力**
             print(f"Converted NED: pos=({ned_x:.3f}, {ned_y:.3f}, {ned_z:.3f})")
-
 
         # データに番号をつける
         if new_id == 1:
@@ -382,7 +414,6 @@ class NatNetClient:
         # Send information to any listener.
         if self.rigid_body_listener is not None:
             self.rigid_body_listener( new_id, pos, rot )
-
 
         # RB Marker Data ( Before version 3.0.  After Version 3.0 Marker data is in description )
         if( major < 3  and major != 0) :
@@ -420,6 +451,7 @@ class NatNetClient:
 
             for i in marker_count_range:
                 rigid_body.add_rigid_body_marker(rb_marker_list[i])
+        
         if major >= 2 :
             marker_error, = FloatValue.unpack( data[offset:offset+4] )
             offset += 4
@@ -460,43 +492,92 @@ class NatNetClient:
                 offset+=offset_tmp
 
         return offset, skeleton
-    
-    # UDPでラズパイにデータを送信
+
     def send_data(self):
-        """UDPソケットでNED変換済みデータを送信"""
-        # バッファのデータをリストにまとめる
+        """ArduPilot用GPS+姿勢データ送信（エラーハンドリング付き）"""
         data_list = list(self.data_buffer.values())
-        
         if data_list:
-            # 最初のデータを取得（通常はID=1のリジッドボディ）
             rigid_body_data = data_list[0]
-            new_id, ned_pos, ned_quat, data_no, data_time = rigid_body_data
             
-            # UDPで送信するデータ構造を作成
-            # フォーマット: [x, y, z, qw, qx, qy, qz, timestamp]
-            udp_data = {
-                'id': new_id,
-                'position': ned_pos,        # [ned_x, ned_y, ned_z]
-                'quaternion': ned_quat,     # [ned_qw, ned_qx, ned_qy, ned_qz]
-                'data_no': data_no,
-                'timestamp': time.time()
-            }
+            # GPS情報が含まれている場合のみ送信
+            if len(rigid_body_data) >= 6:  # GPS変換成功
+                new_id, ned_pos, ned_quat, gps_coords, data_no, data_time = rigid_body_data
+                
+                # **GPS変換成功時のデータ**
+                ardupilot_data = {
+                    'status': 'SUCCESS',          # 正常ステータス
+                    'id': new_id,                 # IDはそのまま
+                    
+                    # **GPS座標（高精度）**
+                    'latitude': gps_coords[0],    # 緯度（小数点以下8桁）
+                    'longitude': gps_coords[1],   # 経度（小数点以下8桁）
+                    'altitude': gps_coords[2],    # 高度（メートル）
+                    
+                    # **姿勢情報（クオータニオン）**
+                    'quaternion': [ned_quat[0], ned_quat[1], ned_quat[2], ned_quat[3]],  # [w,x,y,z]
+                    
+                    # **元のデータ情報**
+                    'data_no': data_no,           # そのまま保持
+                    'data_time': data_time        # そのまま保持
+                }
+                
+                print(f"GPS: lat={gps_coords[0]:.8f}, lon={gps_coords[1]:.8f}, alt={gps_coords[2]:.3f}")
+                
+            else:
+                # **GPS変換失敗時のエラーデータ**
+                new_id, ned_pos, ned_quat, data_no, data_time = rigid_body_data
+                
+                ardupilot_data = {
+                    'status': 'GPS_CONVERSION_FAILED',  # エラーステータス
+                    'id': new_id,
+                    'error_message': 'GPS coordinate conversion failed',
+                    'raw_ned_position': ned_pos,     # 参考用NED位置
+                    'data_no': data_no,
+                    'data_time': data_time
+                }
+                
+                print(f"ERROR: GPS conversion failed, NED=({ned_pos[0]:.3f},{ned_pos[1]:.3f},{ned_pos[2]:.3f})")
             
-            print(f"Sending NED data: pos={ned_pos}, quat={ned_quat}")
-            
-            # UDPソケットの作成と送信
+            # **UDP送信（成功・エラー両方）**
             client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
-                # データのシリアライズ
-                serialized_data = pickle.dumps(udp_data)
-                # Raspberry Piに送信（IPアドレスを適切に設定）
+                serialized_data = pickle.dumps(ardupilot_data)
                 client.sendto(serialized_data, ("192.168.11.50", 15769))
-                print(f"UDP sent to Raspberry Pi: {len(serialized_data)} bytes")
+                
+                if ardupilot_data['status'] == 'SUCCESS':
+                    print(f"GPS data sent: {len(serialized_data)} bytes")
+                else:
+                    print(f"ERROR data sent: {len(serialized_data)} bytes")
+                    
             except Exception as e:
                 print(f"UDP send error: {e}")
             finally:
                 client.close()
 
+    # GPSへの変換を行う
+    def ned_to_gps(self, ned_x, ned_y, ned_z):
+        """
+        NED座標を高精度GPS座標に変換（0.1cmオーダー対応）
+        """
+        try:
+            lat_rad, lon_rad, alt = pyned2lla.ned2lla(
+                self.ref_lat * self.D2R,
+                self.ref_lon * self.D2R,
+                self.ref_alt,
+                ned_x, ned_y, ned_z,
+                self.wgs84
+            )
+            
+            # 0補完を含む高精度丸め処理
+            lat_deg = round(lat_rad * self.R2D, self.gps_precision)
+            lon_deg = round(lon_rad * self.R2D, self.gps_precision)
+            alt_m = round(alt, 3)
+            
+            return lat_deg, lon_deg, alt_m
+            
+        except Exception as e:
+            print(f"GPS conversion error: {e}")
+            return None, None, None
 
     # Motive座標系（X=北,Y=西,Z=下）からNED座標系（X=北,Y=東,Z=下）への変換
     def motive_to_ned(self, motive_x, motive_y, motive_z, motive_qx, motive_qy, motive_qz, motive_qw):
@@ -520,8 +601,6 @@ class NatNetClient:
         print(f"NED quat (w,x,y,z):    ({ned_qw:.6f}, {ned_qx:.6f}, {ned_qy:.6f}, {ned_qz:.6f})")
         
         return ned_x, ned_y, ned_z, ned_qw, ned_qx, ned_qy, ned_qz
-
-
 
 
     def __unpack_asset( self, data, major, minor, asset_num=0):
