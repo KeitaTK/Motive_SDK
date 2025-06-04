@@ -358,6 +358,10 @@ class NatNetClient:
                 motive_qx, motive_qy, motive_qz, motive_qw # クオータニオン(x,y,z,w)
             )
 
+            # バッファに格納
+            self.data_buffer[rb_num] = (new_id, [ned_x, ned_y, ned_z], [ned_qw, ned_qx, ned_qy, ned_qz], self.data_No, data_time)
+
+
             # デバッグ出力を更新
             print(f"Original Motive: pos=({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
             print(f"Relative pos: ({rel_x:.3f}, {rel_y:.3f}, {rel_z:.3f})")
