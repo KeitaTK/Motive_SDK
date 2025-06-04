@@ -102,20 +102,20 @@ class NatNetClient:
         # 原点設定用の変数を追加
         self.origin = None
 
-        # **GPS変換用の高精度設定**
-        self.D2R = math.pi / 180.0        # 度→ラジアン変換
-        self.R2D = 180.0 / math.pi        # ラジアン→度変換
-        self.wgs84 = pyned2lla.wgs84()    # WGS84楕円体
+        # **GPS変換用の設定**
+        self.D2R = math.pi / 180.0
+        self.R2D = 180.0 / math.pi
+        self.wgs84 = pyned2lla.wgs84()
         
-        # **0補完済みの基準GPS座標（指定値）**
-        self.ref_lat = 36.07578000        # 緯度（8桁精度）
-        self.ref_lon = 136.21329000       # 経度（8桁精度）
-        self.ref_alt = 0.000              # 高度（3桁精度）
+        # **基準GPS座標（7桁精度）**
+        self.ref_lat = 36.0757800    # 緯度（7桁に修正）
+        self.ref_lon = 136.2132900   # 経度（7桁に修正）
+        self.ref_alt = 0.000         # 高度（3桁精度）
         
-        # **精度設定**
-        self.gps_precision = 8            # 小数点以下8桁（0.1cmオーダー）
+        # **MAVLink GPS_INPUT対応精度**
+        self.gps_precision = 7       # 小数点以下7桁（約1.1cm精度）
         
-        print(f"GPS reference initialized: ({self.ref_lat:.8f}, {self.ref_lon:.8f}, {self.ref_alt:.3f})")
+        print(f"GPS reference initialized: ({self.ref_lat:.7f}, {self.ref_lon:.7f}, {self.ref_alt:.3f})")
 
 
     # Client/server message ids
@@ -380,8 +380,9 @@ class NatNetClient:
             gps_lat, gps_lon, gps_alt = self.ned_to_gps(ned_x, ned_y, ned_z)
             
             if gps_lat is not None:
-                # **高精度GPS情報の統一フォーマット表示**
-                print(f"GPS: lat={gps_lat:.8f}, lon={gps_lon:.8f}, alt={gps_alt:.3f}")
+                # **7桁精度での表示に修正**
+                print(f"GPS: lat={gps_lat:.7f}, lon={gps_lon:.7f}, alt={gps_alt:.3f}")
+
                 
                 # **バッファにGPS情報も追加（拡張データ構造）**
                 self.data_buffer[rb_num] = (
@@ -494,70 +495,92 @@ class NatNetClient:
         return offset, skeleton
 
     def send_data(self):
-        """ArduPilot用GPS+姿勢データ送信（エラーハンドリング付き）"""
+        """ArduPilot用GPS+yaw角データ送信（7桁精度版）"""
         data_list = list(self.data_buffer.values())
         if data_list:
             rigid_body_data = data_list[0]
-            
-            # GPS情報が含まれている場合のみ送信
-            if len(rigid_body_data) >= 6:  # GPS変換成功
+
+            if len(rigid_body_data) >= 6: # GPS変換成功
                 new_id, ned_pos, ned_quat, gps_coords, data_no, data_time = rigid_body_data
                 
-                # **GPS変換成功時のデータ**
+                yaw_deg = self.quaternion_to_yaw_degrees(ned_quat)
+
                 ardupilot_data = {
-                    'status': 'SUCCESS',          # 正常ステータス
-                    'id': new_id,                 # IDはそのまま
-                    
-                    # **GPS座標（高精度）**
-                    'latitude': gps_coords[0],    # 緯度（小数点以下8桁）
-                    'longitude': gps_coords[1],   # 経度（小数点以下8桁）
-                    'altitude': gps_coords[2],    # 高度（メートル）
-                    
-                    # **姿勢情報（クオータニオン）**
-                    'quaternion': [ned_quat[0], ned_quat[1], ned_quat[2], ned_quat[3]],  # [w,x,y,z]
-                    
-                    # **元のデータ情報**
-                    'data_no': data_no,           # そのまま保持
-                    'data_time': data_time        # そのまま保持
-                }
-                
-                print(f"GPS: lat={gps_coords[0]:.8f}, lon={gps_coords[1]:.8f}, alt={gps_coords[2]:.3f}")
-                
-            else:
-                # **GPS変換失敗時のエラーデータ**
-                new_id, ned_pos, ned_quat, data_no, data_time = rigid_body_data
-                
-                ardupilot_data = {
-                    'status': 'GPS_CONVERSION_FAILED',  # エラーステータス
+                    'status': 'SUCCESS',
                     'id': new_id,
-                    'error_message': 'GPS coordinate conversion failed',
-                    'raw_ned_position': ned_pos,     # 参考用NED位置
+                    
+                    # **GPS座標（7桁精度、GPS_INPUT対応）**
+                    'latitude': gps_coords[0],   # 緯度（小数点以下7桁）
+                    'longitude': gps_coords[1],  # 経度（小数点以下7桁）
+                    'altitude': gps_coords[2],   # 高度（メートル）
+                    
+                    'yaw_degrees': yaw_deg,
                     'data_no': data_no,
                     'data_time': data_time
                 }
-                
-                print(f"ERROR: GPS conversion failed, NED=({ned_pos[0]:.3f},{ned_pos[1]:.3f},{ned_pos[2]:.3f})")
-            
-            # **UDP送信（成功・エラー両方）**
+
+                # **7桁精度での表示に修正**
+                print(f"GPS+Yaw: lat={gps_coords[0]:.7f}, lon={gps_coords[1]:.7f}, yaw={yaw_deg:.3f}°")
+
+
+            else:
+                # GPS変換失敗時のエラーデータ
+                new_id, ned_pos, ned_quat, data_no, data_time = rigid_body_data
+
+                ardupilot_data = {
+                    'status': 'GPS_CONVERSION_FAILED',
+                    'id': new_id,
+                    'error_message': 'GPS coordinate conversion failed',
+                    'raw_ned_position': ned_pos,
+                    'data_no': data_no,
+                    'data_time': data_time
+                }
+
+                print(f"ERROR: GPS conversion failed")
+
+            # UDP送信
             client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
                 serialized_data = pickle.dumps(ardupilot_data)
                 client.sendto(serialized_data, ("192.168.11.50", 15769))
-                
-                if ardupilot_data['status'] == 'SUCCESS':
-                    print(f"GPS data sent: {len(serialized_data)} bytes")
-                else:
-                    print(f"ERROR data sent: {len(serialized_data)} bytes")
-                    
+                print(f"Data sent: {len(serialized_data)} bytes")
             except Exception as e:
                 print(f"UDP send error: {e}")
             finally:
                 client.close()
 
+    def quaternion_to_yaw_degrees(self, ned_quat):
+        """
+        クオータニオンからYaw角を計算（度単位）
+        
+        Args:
+            ned_quat: [ned_qw, ned_qx, ned_qy, ned_qz]
+        
+        Returns:
+            yaw_deg: Yaw角（度単位、0-360度の範囲）
+        """
+        try:
+            ned_qw, ned_qx, ned_qy, ned_qz = ned_quat
+            
+            # クオータニオンからYaw角を計算
+            yaw_rad = math.atan2(2.0 * (ned_qw * ned_qz + ned_qx * ned_qy), 
+                                1.0 - 2.0 * (ned_qy**2 + ned_qz**2))
+            
+            # ラジアンから度に変換し、0-360度に正規化
+            yaw_deg = math.degrees(yaw_rad)
+            if yaw_deg < 0:
+                yaw_deg += 360.0
+                
+            return round(yaw_deg, 3)  # 3桁精度
+            
+        except Exception as e:
+            print(f"Yaw calculation error: {e}")
+            return 0.0
+    
     # GPSへの変換を行う
     def ned_to_gps(self, ned_x, ned_y, ned_z):
         """
-        NED座標を高精度GPS座標に変換（0.1cmオーダー対応）
+        NED座標をGPS座標に変換（MAVLink GPS_INPUT仕様に合わせて7桁精度）
         """
         try:
             lat_rad, lon_rad, alt = pyned2lla.ned2lla(
@@ -568,10 +591,10 @@ class NatNetClient:
                 self.wgs84
             )
             
-            # 0補完を含む高精度丸め処理
-            lat_deg = round(lat_rad * self.R2D, self.gps_precision)
-            lon_deg = round(lon_rad * self.R2D, self.gps_precision)
-            alt_m = round(alt, 3)
+            # **MAVLink GPS_INPUT仕様に合わせて7桁精度に制限**
+            lat_deg = round(lat_rad * self.R2D, 7)
+            lon_deg = round(lon_rad * self.R2D, 7)
+            alt_m = round(alt, 3)  # 高度は3桁精度
             
             return lat_deg, lon_deg, alt_m
             
