@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import socket
 import struct
 from threading import Thread
