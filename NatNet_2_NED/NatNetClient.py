@@ -536,19 +536,27 @@ class NatNetClient:
         return offset, skeleton
 
     def send_data(self):
-        """ArduPilot用GPS+yaw角データ送信（複数剛体対応版）"""
+        """ArduPilot用GPS+yaw角データ送信（宛先別振り分け版）"""
         if len(self.data_buffer) == 0:
             return
         
-        # 送信先IPアドレスの設定
-        ip_addresses = {
-            1: "192.168.11.50",  # 剛体ID 1
-            2: "192.168.11.60"   # 剛体ID 2
+        # 送信先設定（剛体ID → IPアドレスのマッピング）
+        destination_mapping = {
+            1: "192.168.11.50",  # 剛体ID 1 → 192.168.11.50のみ
+            2: "192.168.11.60"   # 剛体ID 2 → 192.168.11.60のみ
         }
         
+        # 各剛体データを対応する宛先にのみ送信
         for rb_index, rigid_body_data in self.data_buffer.items():
             if len(rigid_body_data) >= 6:  # GPS変換成功
                 new_id, ned_pos, ned_quat, gps_coords, data_no, data_time = rigid_body_data
+                
+                # この剛体IDに対応する送信先を取得
+                target_ip = destination_mapping.get(new_id)
+                if target_ip is None:
+                    print(f"警告: 剛体ID {new_id}に対応する送信先が見つかりません")
+                    continue
+                
                 yaw_deg = self.quaternion_to_yaw_degrees(ned_quat)
                 
                 ardupilot_data = {
@@ -562,14 +570,15 @@ class NatNetClient:
                     'data_time': data_time
                 }
                 
-                # 対応するIPアドレスに送信
-                target_ip = ip_addresses.get(new_id, "192.168.11.50")  # デフォルトIP
-                
-                print(f"ID{new_id} GPS+Yaw: lat={gps_coords[0]:.7f}, lon={gps_coords[1]:.7f}, yaw={yaw_deg:.3f}° → {target_ip}")
+                print(f"ID{new_id} → {target_ip}: lat={gps_coords[0]:.7f}, lon={gps_coords[1]:.7f}, yaw={yaw_deg:.3f}°")
                 
             else:
                 # GPS変換失敗時
                 new_id, ned_pos, ned_quat, data_no, data_time = rigid_body_data
+                target_ip = destination_mapping.get(new_id)
+                if target_ip is None:
+                    continue
+                    
                 ardupilot_data = {
                     'status': 'GPS_CONVERSION_FAILED',
                     'id': new_id,
@@ -578,18 +587,22 @@ class NatNetClient:
                     'data_no': data_no,
                     'data_time': data_time
                 }
-                target_ip = ip_addresses.get(new_id, "192.168.11.50")
             
-            # UDP送信
-            client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                serialized_data = pickle.dumps(ardupilot_data)
-                client.sendto(serialized_data, (target_ip, 15769))
-                print(f"Data sent to {target_ip}: {len(serialized_data)} bytes")
-            except Exception as e:
-                print(f"UDP send error to {target_ip}: {e}")
-            finally:
-                client.close()
+            # 対応する宛先にのみUDP送信
+            self._send_to_destination(ardupilot_data, target_ip)
+
+def _send_to_destination(self, data, target_ip):
+    """指定された宛先にデータを送信"""
+    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        serialized_data = pickle.dumps(data)
+        client.sendto(serialized_data, (target_ip, 15769))
+        print(f"Data sent to {target_ip}: {len(serialized_data)} bytes")
+    except Exception as e:
+        print(f"UDP send error to {target_ip}: {e}")
+    finally:
+        client.close()
+
 
 
     def quaternion_to_yaw_degrees(self, ned_quat):
