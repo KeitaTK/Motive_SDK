@@ -117,6 +117,10 @@ class NatNetClient:
         
         print(f"GPS reference initialized: ({self.ref_lat:.7f}, {self.ref_lon:.7f}, {self.ref_alt:.3f})")
 
+        # 複数剛体対応のための変数初期化
+        self.origins = {}  # 各剛体の原点を個別管理
+
+
 
     # Client/server message ids
     NAT_CONNECT               = 0
@@ -401,15 +405,52 @@ class NatNetClient:
             # **デバッグ出力**
             print(f"Converted NED: pos=({ned_x:.3f}, {ned_y:.3f}, {ned_z:.3f})")
 
-        # データに番号をつける
-        if new_id == 1:
-            self.data_No = self.data_No + 1
+        # # データに番号をつける
+        # if new_id == 1:
+        #     self.data_No = self.data_No + 1
 
-        # IDが1のデータが確認できたら送信
-        if 0 in self.data_buffer:
-            self.send_data()
-            self.data_buffer.clear()
+        # # IDが1のデータが確認できたら送信
+        # if 0 in self.data_buffer:
+        #     self.send_data()
+        #     self.data_buffer.clear()
 
+        if new_id in [1, 2]:  # 剛体ID 1と2を処理
+            # 原点設定と相対位置計算を個別に管理
+            origin_key = f"origin_{new_id}"
+            if origin_key not in self.__dict__:
+                setattr(self, origin_key, [pos[0], pos[1], pos[2]])
+                print(f"Origin for ID {new_id} set to: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
+            
+            origin = getattr(self, origin_key)
+            
+            # 相対位置を計算
+            rel_x = pos[0] - origin[0]
+            rel_y = pos[1] - origin[1]
+            rel_z = pos[2] - origin[2]
+            
+            # ... 座標変換処理は同じ ...
+            
+            # データバッファに格納（剛体番号をキーとして使用）
+            rb_num = new_id - 1  # ID 1 → index 0, ID 2 → index 1
+            self.data_buffer[rb_num] = (
+                new_id,
+                [ned_x, ned_y, ned_z],
+                [ned_qw, ned_qx, ned_qy, ned_qz],
+                [gps_lat, gps_lon, gps_alt],
+                self.data_No,
+                data_time
+            )
+            
+            # データ番号の更新
+            if new_id == 1:
+                self.data_No = self.data_No + 1
+            
+            # 両方の剛体データが揃ったら送信
+            if len(self.data_buffer) >= 2:
+                self.send_data()
+                self.data_buffer.clear()
+
+    
         rigid_body = MoCapData.RigidBody(new_id, pos, rot)
 
         # Send information to any listener.
@@ -495,38 +536,40 @@ class NatNetClient:
         return offset, skeleton
 
     def send_data(self):
-        """ArduPilot用GPS+yaw角データ送信（7桁精度版）"""
-        data_list = list(self.data_buffer.values())
-        if data_list:
-            rigid_body_data = data_list[0]
-
-            if len(rigid_body_data) >= 6: # GPS変換成功
+        """ArduPilot用GPS+yaw角データ送信（複数剛体対応版）"""
+        if len(self.data_buffer) == 0:
+            return
+        
+        # 送信先IPアドレスの設定
+        ip_addresses = {
+            1: "192.168.11.50",  # 剛体ID 1
+            2: "192.168.11.60"   # 剛体ID 2
+        }
+        
+        for rb_index, rigid_body_data in self.data_buffer.items():
+            if len(rigid_body_data) >= 6:  # GPS変換成功
                 new_id, ned_pos, ned_quat, gps_coords, data_no, data_time = rigid_body_data
-                
                 yaw_deg = self.quaternion_to_yaw_degrees(ned_quat)
-
+                
                 ardupilot_data = {
                     'status': 'SUCCESS',
                     'id': new_id,
-                    
-                    # **GPS座標（7桁精度、GPS_INPUT対応）**
-                    'latitude': gps_coords[0],   # 緯度（小数点以下7桁）
-                    'longitude': gps_coords[1],  # 経度（小数点以下7桁）
-                    'altitude': gps_coords[2],   # 高度（メートル）
-                    
+                    'latitude': gps_coords[0],
+                    'longitude': gps_coords[1],
+                    'altitude': gps_coords[2],
                     'yaw_degrees': yaw_deg,
                     'data_no': data_no,
                     'data_time': data_time
                 }
-
-                # **7桁精度での表示に修正**
-                print(f"GPS+Yaw: lat={gps_coords[0]:.7f}, lon={gps_coords[1]:.7f}, yaw={yaw_deg:.3f}°")
-
-
+                
+                # 対応するIPアドレスに送信
+                target_ip = ip_addresses.get(new_id, "192.168.11.50")  # デフォルトIP
+                
+                print(f"ID{new_id} GPS+Yaw: lat={gps_coords[0]:.7f}, lon={gps_coords[1]:.7f}, yaw={yaw_deg:.3f}° → {target_ip}")
+                
             else:
-                # GPS変換失敗時のエラーデータ
+                # GPS変換失敗時
                 new_id, ned_pos, ned_quat, data_no, data_time = rigid_body_data
-
                 ardupilot_data = {
                     'status': 'GPS_CONVERSION_FAILED',
                     'id': new_id,
@@ -535,19 +578,19 @@ class NatNetClient:
                     'data_no': data_no,
                     'data_time': data_time
                 }
-
-                print(f"ERROR: GPS conversion failed")
-
+                target_ip = ip_addresses.get(new_id, "192.168.11.50")
+            
             # UDP送信
             client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
                 serialized_data = pickle.dumps(ardupilot_data)
-                client.sendto(serialized_data, ("192.168.11.50", 15769))
-                print(f"Data sent: {len(serialized_data)} bytes")
+                client.sendto(serialized_data, (target_ip, 15769))
+                print(f"Data sent to {target_ip}: {len(serialized_data)} bytes")
             except Exception as e:
-                print(f"UDP send error: {e}")
+                print(f"UDP send error to {target_ip}: {e}")
             finally:
                 client.close()
+
 
     def quaternion_to_yaw_degrees(self, ned_quat):
         """
