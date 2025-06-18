@@ -99,8 +99,8 @@ class NatNetClient:
         self.data_buffer = {}
         self.data_No = 0
         self.time_log = 0
-        # 原点設定用の変数を追加
-        self.origin = None
+        # # 原点設定用の変数を追加
+        # self.origin = None
 
         # **GPS変換用の設定**
         self.D2R = math.pi / 180.0
@@ -117,8 +117,8 @@ class NatNetClient:
         
         print(f"GPS reference initialized: ({self.ref_lat:.7f}, {self.ref_lon:.7f}, {self.ref_alt:.3f})")
 
-        # 複数剛体対応のための変数初期化
-        self.origins = {}  # 各剛体の原点を個別管理
+        # # 複数剛体対応のための変数初期化
+        # self.origins = {}  # 各剛体の原点を個別管理
 
 
 
@@ -334,187 +334,90 @@ class NatNetClient:
         return result
 
     # Unpack a rigid body object from a data packet
-    def __unpack_rigid_body( self, data, major, minor, rb_num):
+    def __unpack_rigid_body(self, data, major, minor, rb_num):
         offset = 0
 
-        # ID (4 bytes)
-        new_id = int.from_bytes( data[offset:offset+4], byteorder='little', signed=True )
+        # Rigid Body の ID を取得
+        new_id = int.from_bytes(data[offset:offset+4], byteorder='little', signed=True)
         offset += 4
 
-        trace_mf( "RB: %3.1d ID: %3.1d"% (rb_num, new_id))
-
-        # Position and orientation
-        pos = Vector3.unpack( data[offset:offset+12] )
+        # 位置（x, y, z）と姿勢クオータニオン（x, y, z, w）をアンパック
+        pos = Vector3.unpack(data[offset:offset+12])
         offset += 12
-
-        trace_mf( "\tPosition : [%3.2f, %3.2f, %3.2f]"% (pos[0], pos[1], pos[2] ))
-
-        rot = Quaternion.unpack( data[offset:offset+16] )
+        rot = Quaternion.unpack(data[offset:offset+16])
         offset += 16
 
-        trace_mf( "\tOrientation : [%3.2f, %3.2f, %3.2f, %3.2f]"% (rot[0], rot[1], rot[2], rot[3] ))
-
+        # データ受信タイミングの計測
         now_time = time.perf_counter()
         data_time = now_time - self.time_log
 
-        if new_id == 1:
-            # 原点設定と相対位置計算を追加
-            if not self.origin:
-                self.origin = [pos[0], pos[1], pos[2]]
-                print(f"Origin set to: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
+        # 剛体ID 1 & 2 のいずれかを処理
+        if new_id in [1, 2]:
+            # 絶対位置をそのまま使用
+            rel_x, rel_y, rel_z = pos
+            motive_qx, motive_qy, motive_qz, motive_qw = rot
 
-            # 相対位置を計算
-            rel_x = pos[0] - self.origin[0]
-            rel_y = pos[1] - self.origin[1]
-            rel_z = pos[2] - self.origin[2]
-
-            # rot は (x, y, z, w) の順序
-            motive_qx = rot[0] # x成分
-            motive_qy = rot[1] # y成分
-            motive_qz = rot[2] # z成分
-            motive_qw = rot[3] # w成分
-
-            # 相対位置を使ってMotive座標系からNED座標系に変換
+            # Motive座標系 → NED座標系への変換
             ned_x, ned_y, ned_z, ned_qw, ned_qx, ned_qy, ned_qz = self.motive_to_ned(
-                rel_x, rel_y, rel_z, # 相対位置を使用
-                motive_qx, motive_qy, motive_qz, motive_qw # クオータニオン(x,y,z,w)
+                rel_x, rel_y, rel_z,
+                motive_qx, motive_qy, motive_qz, motive_qw
             )
 
-            # **追加：高精度GPS座標変換（0.1cmオーダー対応）**
+            # NED → GPS（緯度・経度・高度）の変換
             gps_lat, gps_lon, gps_alt = self.ned_to_gps(ned_x, ned_y, ned_z)
-            
             if gps_lat is not None:
-                # **7桁精度での表示に修正**
                 print(f"GPS: lat={gps_lat:.7f}, lon={gps_lon:.7f}, alt={gps_alt:.3f}")
-
-                
-                # **バッファにGPS情報も追加（拡張データ構造）**
-                self.data_buffer[rb_num] = (
-                    new_id, 
-                    [ned_x, ned_y, ned_z],           # NED位置
-                    [ned_qw, ned_qx, ned_qy, ned_qz], # NED姿勢
-                    [gps_lat, gps_lon, gps_alt],     # 高精度GPS座標
-                    self.data_No, 
+                # バッファにデータを格納
+                self.data_buffer[new_id - 1] = (
+                    new_id,
+                    [ned_x, ned_y, ned_z],
+                    [ned_qw, ned_qx, ned_qy, ned_qz],
+                    [gps_lat, gps_lon, gps_alt],
+                    self.data_No,
                     data_time
                 )
             else:
-                # GPS変換失敗時は従来のデータ構造
                 print(f"ERROR: GPS conversion failed for NED=({ned_x:.3f}, {ned_y:.3f}, {ned_z:.3f})")
-                self.data_buffer[rb_num] = (new_id, [ned_x, ned_y, ned_z], [ned_qw, ned_qx, ned_qy, ned_qz], self.data_No, data_time)
+                self.data_buffer[new_id - 1] = (
+                    new_id,
+                    [ned_x, ned_y, ned_z],
+                    [ned_qw, ned_qx, ned_qy, ned_qz],
+                    self.data_No,
+                    data_time
+                )
 
-            # **デバッグ出力**
-            print(f"Converted NED: pos=({ned_x:.3f}, {ned_y:.3f}, {ned_z:.3f})")
-
-        # # データに番号をつける
-        # if new_id == 1:
-        #     self.data_No = self.data_No + 1
-
-        # # IDが1のデータが確認できたら送信
-        # if 0 in self.data_buffer:
-        #     self.send_data()
-        #     self.data_buffer.clear()
-
-        if new_id in [1, 2]:  # 剛体ID 1と2を処理
-            # 原点設定と相対位置計算を個別に管理
-            origin_key = f"origin_{new_id}"
-            if origin_key not in self.__dict__:
-                setattr(self, origin_key, [pos[0], pos[1], pos[2]])
-                print(f"Origin for ID {new_id} set to: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})")
-            
-            origin = getattr(self, origin_key)
-            
-            # 相対位置を計算
-            rel_x = pos[0] - origin[0]
-            rel_y = pos[1] - origin[1]
-            rel_z = pos[2] - origin[2]
-            
-            # ... 座標変換処理は同じ ...
-            
-            # データバッファに格納（剛体番号をキーとして使用）
-            rb_num = new_id - 1  # ID 1 → index 0, ID 2 → index 1
-            self.data_buffer[rb_num] = (
-                new_id,
-                [ned_x, ned_y, ned_z],
-                [ned_qw, ned_qx, ned_qy, ned_qz],
-                [gps_lat, gps_lon, gps_alt],
-                self.data_No,
-                data_time
-            )
-            
-            # データ番号の更新
+            # 剛体ID=1 のときのみデータ番号をインクリメント
             if new_id == 1:
-                self.data_No = self.data_No + 1
-            
+                self.data_No += 1
+
             # 両方の剛体データが揃ったら送信
             if len(self.data_buffer) >= 2:
                 self.send_data()
                 self.data_buffer.clear()
 
-    
+        # MoCapData オブジェクトの生成とコールバック通知
         rigid_body = MoCapData.RigidBody(new_id, pos, rot)
-
-        # Send information to any listener.
         if self.rigid_body_listener is not None:
-            self.rigid_body_listener( new_id, pos, rot )
+            self.rigid_body_listener(new_id, pos, rot)
 
-        # RB Marker Data ( Before version 3.0.  After Version 3.0 Marker data is in description )
-        if( major < 3  and major != 0) :
-            # Marker count (4 bytes)
-            marker_count = int.from_bytes( data[offset:offset+4], byteorder='little',  signed=True )
+        # マーカーデータ処理（バージョン判定付き）
+        if (major < 3 and major != 0):
+            marker_count = int.from_bytes(data[offset:offset+4], byteorder='little', signed=True)
             offset += 4
-            marker_count_range = range( 0, marker_count )
-            trace_mf( "\tMarker Count:", marker_count )
-
-            rb_marker_list=[]
-            for i in marker_count_range:
-                rb_marker_list.append(MoCapData.RigidBodyMarker())
-
-            # Marker positions
-            for i in marker_count_range:
-                pos = Vector3.unpack( data[offset:offset+12] )
+            for i in range(marker_count):
+                pos_m = Vector3.unpack(data[offset:offset+12])
                 offset += 12
-                trace_mf( "\tMarker", i, ":", pos[0],",", pos[1],",", pos[2] )
-                rb_marker_list[i].pos=pos
-
-            if major >= 2:
-                # Marker ID's
-                for i in marker_count_range:
-                    new_id = int.from_bytes( data[offset:offset+4], byteorder='little',  signed=True )
-                    offset += 4
-                    trace_mf( "\tMarker ID", i, ":", new_id )
-                    rb_marker_list[i].id=new_id
-
-                # Marker sizes
-                for i in marker_count_range:
-                    size = FloatValue.unpack( data[offset:offset+4] )
-                    offset += 4
-                    trace_mf( "\tMarker Size", i, ":", size[0] )
-                    rb_marker_list[i].size=size
-
-            for i in marker_count_range:
-                rigid_body.add_rigid_body_marker(rb_marker_list[i])
-        
-        if major >= 2 :
-            marker_error, = FloatValue.unpack( data[offset:offset+4] )
-            offset += 4
-            trace_mf( "\tMean Marker Error: %3.2f"% marker_error )
-            rigid_body.error = marker_error
-
-        # Version 2.6 and later
-        if ( ( major == 2 ) and ( minor >= 6 ) ) or major > 2 :
-            param, = struct.unpack( 'h', data[offset:offset+2] )
-            tracking_valid = ( param & 0x01 ) != 0
+                # マーカーデータを rigid_body に追加
+                mb = MoCapData.RigidBodyMarker()
+                mb.pos = pos_m
+                rigid_body.add_rigid_body_marker(mb)
+        if ((major == 2 and minor >= 6) or major > 2):
+            param, = struct.unpack('h', data[offset:offset+2])
             offset += 2
-            is_valid_str='False'
-            if tracking_valid:
-                is_valid_str = 'True'
-            trace_mf( "\tTracking Valid: %s"%is_valid_str)
-            if tracking_valid:
-                rigid_body.tracking_valid = True
-            else:
-                rigid_body.tracking_valid = False
+            rigid_body.tracking_valid = bool(param & 0x01)
 
         return offset, rigid_body
+
 
     # Unpack a skeleton object from a data packet
     def __unpack_skeleton( self, data, major, minor, skeleton_num=0):
@@ -591,17 +494,17 @@ class NatNetClient:
             # 対応する宛先にのみUDP送信
             self._send_to_destination(ardupilot_data, target_ip)
 
-def _send_to_destination(self, data, target_ip):
-    """指定された宛先にデータを送信"""
-    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        serialized_data = pickle.dumps(data)
-        client.sendto(serialized_data, (target_ip, 15769))
-        print(f"Data sent to {target_ip}: {len(serialized_data)} bytes")
-    except Exception as e:
-        print(f"UDP send error to {target_ip}: {e}")
-    finally:
-        client.close()
+    def _send_to_destination(self, data, target_ip):
+        """指定された宛先にデータを送信"""
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            serialized_data = pickle.dumps(data)
+            client.sendto(serialized_data, (target_ip, 15769))
+            print(f"Data sent to {target_ip}: {len(serialized_data)} bytes")
+        except Exception as e:
+            print(f"UDP send error to {target_ip}: {e}")
+        finally:
+            client.close()
 
 
 
