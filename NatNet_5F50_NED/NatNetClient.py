@@ -510,7 +510,7 @@ class NatNetClient:
                     'id': new_id,
                     
                     # **GPS座標（7桁精度、GPS_INPUT対応）**
-                    # 'latitude': gps_coords[0],   # 緯度（小数点以下7桁）
+                    'latitude': gps_coords[0],   # 緯度（小数点以下7桁）
                     'longitude': gps_coords[1],  # 経度（小数点以下7桁）
                     'altitude': gps_coords[2],   # 高度（メートル）
                     
