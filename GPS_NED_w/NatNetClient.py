@@ -300,7 +300,9 @@ class NatNetClient:
         from datetime import datetime
         start_dt = datetime.fromtimestamp(self.recording_start_time)
         filename = start_dt.strftime("record_%Y%m%d_%H%M%S.csv")
-        filepath = os.path.join(os.path.dirname(__file__), filename)
+        # ダウンロードフォルダに保存
+        download_folder = os.path.expanduser("~/Downloads")
+        filepath = os.path.join(download_folder, filename)
         
         # CSV書き込み
         try:

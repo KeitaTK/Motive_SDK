@@ -118,14 +118,41 @@ def my_parse_args(arg_list, args_dict):
 def q_stop():
     global is_looping
     while True:
-        inchars = input()
-        if len(inchars)>0:
-            c1 = inchars[0].lower()
-            if c1 == 'q':
-                is_looping = False
-                streaming_client.shutdown()
-                sys.exit()
-                break
+        try:
+            inchars = input()
+            if len(inchars) > 0:
+                c1 = inchars[0].lower()
+                if c1 == 'q':
+                    print("\nプログラム終了...")
+                    is_looping = False
+                    streaming_client.shutdown()
+                    sys.exit()
+                    break
+                elif c1 == 's':
+                    # 記録開始
+                    print("\n記録開始コマンド受信")
+                    streaming_client.start_recording()
+                elif c1 == 'e':
+                    # 記録終了
+                    print("\n記録終了コマンド受信")
+                    streaming_client.stop_recording()
+                elif c1 == 'h':
+                    # ヘルプ表示
+                    print("\n--- コマンド一覧 ---")
+                    print("s: 記録開始")
+                    print("e: 記録終了")
+                    print("q: プログラム終了")
+                    print("h: このヘルプを表示")
+                    print("------------------")
+        except KeyboardInterrupt:
+            print("\nキーボード割り込み: プログラム終了...")
+            is_looping = False
+            streaming_client.shutdown()
+            sys.exit()
+            break
+        except Exception as e:
+            print(f"入力エラー: {e}")
+            break
 
 
 #受け取ったデータを表示するメソッド　勝手にスレッドで回ってる
@@ -195,20 +222,23 @@ if __name__ == "__main__":
 
     print_configuration(streaming_client)
     print("\n")
+    print("=== コマンド入力開始 ===")
+    print("利用可能なコマンド:")
+    print("  s: 記録開始")
+    print("  e: 記録終了")
+    print("  h: ヘルプ表示")
+    print("  q: プログラム終了")
+    print("========================\n")
 
     # thre = threading.Thread( target = rvlocal)
     # thre.start()
 
-    thre = threading.Thread( target = q_stop)
+    thre = threading.Thread(target=q_stop, daemon=True)
     thre.start()
 
-
-
-    # while is_looping:
-    #     time.sleep(1)
-    #     print(new_id)
-    #     print(pos)
-    #     print(rot)
+    # メインスレッドをアクティブに保つ
+    while is_looping:
+        time.sleep(1)
 
 
 
