@@ -9,6 +9,8 @@ import MoCapData
 import math
 import pyned2lla
 import pickle
+import json
+import os
 
 def trace( *args ):
     # uncomment the one you want to use
@@ -96,6 +98,11 @@ class NatNetClient:
         self.data_buffer = {}
         self.data_No = 0
         self.time_log = 0
+        
+        # **記録機能用変数**
+        self.is_recording = False
+        self.recording_data = []  # 記録データバッファ
+        self.recording_start_time = None  # 記録開始時刻
 
         # **GPS変換用の設定**
         self.D2R = math.pi / 180.0
@@ -107,11 +114,20 @@ class NatNetClient:
         self.ref_lon = 136.2132900  # 経度（7桁精度） 
         self.ref_alt = 0.000  # 高度（3桁精度）
         
-        # **UDP送信先設定（剛体ID別）**
-        self.udp_targets = {
-            1: "192.168.11.16",  # 剛体ID 1 → 192.168.11.16
-            2: "192.168.11.61"   # 剛体ID 2 → 192.168.11.61
-        }
+        # **設定ファイル読み込み（config.json）**
+        config_path = os.path.join(os.path.dirname(__file__), "config.json")
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            # UDP送信先設定
+            udp_targets_dict = config.get("udp_targets", {})
+            self.udp_targets = {int(k): v for k, v in udp_targets_dict.items()}
+            # 記録機能の有効/無効
+            self.recording_enabled = config.get("recording_enabled", False)
+        except Exception as e:
+            print(f"[警告] config.jsonの読み込みに失敗: {e}")
+            self.udp_targets = {}
+            self.recording_enabled = False
         self.udp_port = 15769
         
         # UDP統計情報
@@ -246,6 +262,79 @@ class NatNetClient:
                 client.close()
             except:
                 pass
+
+    def start_recording(self):
+        """記録開始"""
+        if not self.recording_enabled:
+            print("記録機能が無効です（config.jsonで有効化してください）")
+            return
+        
+        if self.is_recording:
+            print("すでに記録中です")
+            return
+            
+        self.is_recording = True
+        self.recording_data = []
+        self.recording_start_time = time.time()
+        print("==================")
+        print("記録開始！")
+        print("==================")
+
+    def stop_recording(self):
+        """記録停止とCSV保存"""
+        if not self.is_recording:
+            print("記録していません")
+            return
+            
+        self.is_recording = False
+        print("==================")
+        print("記録停止！")
+        print("==================")
+        
+        # CSV保存
+        if len(self.recording_data) == 0:
+            print("記録データがありません")
+            return
+            
+        # ファイル名生成（記録開始時刻を使用）
+        from datetime import datetime
+        start_dt = datetime.fromtimestamp(self.recording_start_time)
+        filename = start_dt.strftime("record_%Y%m%d_%H%M%S.csv")
+        filepath = os.path.join(os.path.dirname(__file__), filename)
+        
+        # CSV書き込み
+        try:
+            import csv
+            with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                # ヘッダー
+                writer.writerow(['timestamp', 'rigid_body_id', 
+                               'pos_x', 'pos_y', 'pos_z',
+                               'quat_x', 'quat_y', 'quat_z', 'quat_w'])
+                # データ
+                for row in self.recording_data:
+                    writer.writerow(row)
+            
+            print(f"CSV保存完了: {filename} ({len(self.recording_data)}行)")
+        except Exception as e:
+            print(f"CSV保存エラー: {e}")
+
+    def keyboard_listener(self):
+        """エンターキー監視スレッド"""
+        if not self.recording_enabled:
+            return
+            
+        print("\n[記録機能] エンターキーで記録開始/停止")
+        while not self.stop_threads:
+            try:
+                key = input()
+                if key == "":  # エンターキー
+                    if not self.is_recording:
+                        self.start_recording()
+                    else:
+                        self.stop_recording()
+            except:
+                break
 
     def set_client_address(self, local_ip_address):
         if not self.__is_locked:
@@ -458,8 +547,18 @@ class NatNetClient:
         now_time = time.perf_counter()
         data_time = now_time - self.time_log
 
-        # 剛体ID 1 & 2 のデータを処理
-        if new_id in [1, 2]:
+        # **記録機能: Motiveから受信した生データを記録**
+        if self.is_recording:
+            # timestamp, rigid_body_id, pos_x, pos_y, pos_z, quat_x, quat_y, quat_z, quat_w
+            self.recording_data.append([
+                data_time,
+                new_id,
+                pos[0], pos[1], pos[2],
+                rot[0], rot[1], rot[2], rot[3]
+            ])
+
+        # udp_targets.jsonに設定された剛体IDのデータを処理
+        if new_id in self.udp_targets:
             if new_id == 1:
                 self.time_log = now_time
 
@@ -1272,6 +1371,11 @@ class NatNetClient:
         # Create a separate thread for receiving command packets
         self.command_thread = Thread( target = self.__command_thread_function, args = (self.command_socket, lambda : self.stop_threads, lambda : self.print_level,))
         self.command_thread.start()
+
+        # Create a keyboard listener thread for recording
+        if self.recording_enabled:
+            self.keyboard_thread = Thread(target=self.keyboard_listener, daemon=True)
+            self.keyboard_thread.start()
 
         # Required for setup
         # Get NatNet and server versions
