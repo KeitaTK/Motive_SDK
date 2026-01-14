@@ -562,7 +562,7 @@ class NatNetClient:
         # udp_targets.jsonに設定された剛体IDのデータを処理
         if new_id in self.udp_targets:
             if new_id == 1:
-                self.time_log = now_time
+                self.time_log = official_timestamp
 
             # Motive座標系 → NED座標系への変換
             rel_x, rel_y, rel_z = pos
@@ -594,8 +594,8 @@ class NatNetClient:
                     'motive_position': [rel_x, rel_y, rel_z],
                     'motive_rotation': [motive_qx, motive_qy, motive_qz, motive_qw],
                     'data_no': self.data_No,
-                    'timestamp': data_time,
-                    'frame_time': now_time
+                    'timestamp': official_timestamp,
+                    'frame_time': official_timestamp
                 }
                 
                 # 50回に1回のみコンソール表示
@@ -613,8 +613,8 @@ class NatNetClient:
                     'motive_position': [rel_x, rel_y, rel_z],
                     'motive_rotation': [motive_qx, motive_qy, motive_qz, motive_qw],
                     'data_no': self.data_No,
-                    'timestamp': data_time,
-                    'frame_time': now_time
+                    'timestamp': official_timestamp,
+                    'frame_time': official_timestamp
                 }
                 
                 print(f"ERROR: GPS conversion failed for ID {new_id}")
@@ -645,7 +645,7 @@ class NatNetClient:
                 'gps_coords': [gps_lat, gps_lon, gps_alt] if gps_lat is not None else None,
                 'yaw_degrees': yaw_deg,
                 'data_no': self.data_No,
-                'time': data_time
+                'time': official_timestamp
             }
 
             # データ番号をインクリメント
