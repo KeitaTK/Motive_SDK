@@ -545,15 +545,15 @@ class NatNetClient:
 
         trace_mf( "\tOrientation : [%3.2f, %3.2f, %3.2f, %3.2f]"% (rot[0], rot[1], rot[2], rot[3] ))
 
-        # タイムスタンプ計測
-        now_time = time.perf_counter()
-        data_time = now_time - self.time_log
-
+        # 公式タイムスタンプ（frame_suffix_data.timestamp）を取得
+        official_timestamp = None
+        if hasattr(self, 'current_frame_timestamp'):
+            official_timestamp = self.current_frame_timestamp
         # **記録機能: Motiveから受信した生データを記録**
         if self.is_recording:
             # timestamp, rigid_body_id, pos_x, pos_y, pos_z, quat_x, quat_y, quat_z, quat_w
             self.recording_data.append([
-                data_time,
+                official_timestamp,
                 new_id,
                 pos[0], pos[1], pos[2],
                 rot[0], rot[1], rot[2], rot[3]
@@ -1041,6 +1041,8 @@ class NatNetClient:
         timestamp = frame_suffix_data.timestamp
         is_recording = frame_suffix_data.is_recording
         tracked_models_changed = frame_suffix_data.tracked_models_changed
+        # 公式タイムスタンプを剛体記録用に一時保存
+        self.current_frame_timestamp = timestamp
 
         # Send information to any listener.
         if self.new_frame_listener is not None:

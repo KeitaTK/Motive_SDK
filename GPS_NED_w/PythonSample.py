@@ -124,39 +124,55 @@ def keyboard_monitor():
     print("  q: プログラム終了")
     print("  h: ヘルプ表示\n")
     
+    enter_count = 0
     while is_looping:
         try:
             # キーが押されているかチェック（非ブロッキング）
             if msvcrt.kbhit():
                 key = msvcrt.getch()
-                
                 # Enterキー（\r または \n）
                 if key in [b'\r', b'\n']:
-                    if not streaming_client.is_recording:
-                        print("\n[Enter押下] 記録開始...")
-                        streaming_client.start_recording()
-                    else:
-                        print("\n[Enter押下] 記録終了...")
-                        streaming_client.stop_recording()
-                
+                    enter_count += 1
+                    if enter_count == 1:
+                        if not streaming_client.is_recording:
+                            print("\n[Enter押下1回目] 記録開始...")
+                            streaming_client.start_recording()
+                        else:
+                            print("\n[Enter押下1回目] すでに記録中です")
+                    elif enter_count == 2:
+                        print("\n[Enter押下2回目] 全0行を挿入...")
+                        # 記録データのカラム数を推定し、全0行を追加
+                        # 既存データがあればその形式に合わせる
+                        zero_row = None
+                        if streaming_client.recording_data:
+                            zero_row = [0 if isinstance(x, (int, float)) else '0' for x in streaming_client.recording_data[0]]
+                        else:
+                            # データがまだなければ仮で10カラムの0
+                            zero_row = [0]*10
+                        streaming_client.recording_data.append(zero_row)
+                        print(f"全0行を追加: {zero_row}")
+                    elif enter_count == 3:
+                        if streaming_client.is_recording:
+                            print("\n[Enter押下3回目] 記録終了...")
+                            streaming_client.stop_recording()
+                        else:
+                            print("\n[Enter押下3回目] 記録中ではありません")
+                        enter_count = 0  # リセット
                 # qキー
                 elif key in [b'q', b'Q']:
                     print("\n[q押下] プログラム終了...")
                     is_looping = False
                     streaming_client.shutdown()
                     break
-                
                 # hキー
                 elif key in [b'h', b'H']:
                     print("\n--- ヘルプ ---")
-                    print("  Enter: 記録開始/終了（トグル）")
+                    print("  Enter: 1回目 記録開始 / 2回目 全0行挿入 / 3回目 記録停止")
                     print("  q: プログラム終了")
                     print("  h: このヘルプを表示")
                     print("--------------\n")
-            
             # CPU負荷を減らすため少し待機
             time.sleep(0.1)
-            
         except KeyboardInterrupt:
             print("\nキーボード割り込み: プログラム終了...")
             is_looping = False
