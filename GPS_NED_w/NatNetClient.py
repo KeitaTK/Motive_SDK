@@ -283,7 +283,7 @@ class NatNetClient:
     def stop_recording(self):
         """記録停止とCSV保存"""
         if not self.is_recording:
-            print("記録していません")
+            print("[DEBUG] 記録していません")
             return
             
         self.is_recording = False
@@ -293,19 +293,26 @@ class NatNetClient:
         
         # CSV保存
         if len(self.recording_data) == 0:
-            print("記録データがありません")
+            print("[DEBUG] 記録データがありません")
             return
+        
+        print(f"[DEBUG] 記録データ行数: {len(self.recording_data)}")
+        print(f"[DEBUG] 最初の3行のサンプル:")
+        for i, row in enumerate(self.recording_data[:3]):
+            print(f"  [行{i}]: {row}")
             
         # ファイル名生成（記録開始時刻を使用）
-        from datetime import datetime
-        start_dt = datetime.fromtimestamp(self.recording_start_time)
-        filename = start_dt.strftime("record_%Y%m%d_%H%M%S.csv")
-        # ダウンロードフォルダに保存
-        download_folder = os.path.expanduser("~/Downloads")
-        filepath = os.path.join(download_folder, filename)
-        
-        # CSV書き込み
         try:
+            from datetime import datetime
+            start_dt = datetime.fromtimestamp(self.recording_start_time)
+            filename = start_dt.strftime("record_%Y%m%d_%H%M%S.csv")
+            # ダウンロードフォルダに保存
+            download_folder = os.path.expanduser("~/Downloads")
+            filepath = os.path.join(download_folder, filename)
+            
+            print(f"[DEBUG] CSVファイル保存先: {filepath}")
+            
+            # CSV書き込み
             import csv
             with open(filepath, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -319,7 +326,9 @@ class NatNetClient:
             
             print(f"CSV保存完了: {filename} ({len(self.recording_data)}行)")
         except Exception as e:
-            print(f"CSV保存エラー: {e}")
+            print(f"[ERROR] CSV保存エラー: {e}")
+            import traceback
+            traceback.print_exc()
 
     def keyboard_listener(self):
         """エンターキー監視スレッド"""

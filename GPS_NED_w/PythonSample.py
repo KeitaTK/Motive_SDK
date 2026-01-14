@@ -124,7 +124,7 @@ def keyboard_monitor():
     print("  q: プログラム終了")
     print("  h: ヘルプ表示\n")
     
-    enter_count = 0
+    recording_state = None  # None: 記録未開始, 'recording': 記録中, 'zero_inserted': 0行挿入済み
     while is_looping:
         try:
             # キーが押されているかチェック（非ブロッキング）
@@ -132,32 +132,46 @@ def keyboard_monitor():
                 key = msvcrt.getch()
                 # Enterキー（\r または \n）
                 if key in [b'\r', b'\n']:
-                    enter_count += 1
-                    if enter_count == 1:
-                        if not streaming_client.is_recording:
-                            print("\n[Enter押下1回目] 記録開始...")
-                            streaming_client.start_recording()
-                        else:
-                            print("\n[Enter押下1回目] すでに記録中です")
-                    elif enter_count == 2:
-                        print("\n[Enter押下2回目] 全0行を挿入...")
-                        # 記録データのカラム数を推定し、全0行を追加
-                        # 既存データがあればその形式に合わせる
-                        zero_row = None
-                        if streaming_client.recording_data:
-                            zero_row = [0 if isinstance(x, (int, float)) else '0' for x in streaming_client.recording_data[0]]
-                        else:
-                            # データがまだなければ仮で10カラムの0
-                            zero_row = [0]*10
-                        streaming_client.recording_data.append(zero_row)
-                        print(f"全0行を追加: {zero_row}")
-                    elif enter_count == 3:
-                        if streaming_client.is_recording:
-                            print("\n[Enter押下3回目] 記録終了...")
-                            streaming_client.stop_recording()
-                        else:
-                            print("\n[Enter押下3回目] 記録中ではありません")
-                        enter_count = 0  # リセット
+                    try:
+                        # トグルロジック: 記録なし → 記録開始 → 0行挿入 → 記録停止 → 記録なし
+                        if recording_state is None:
+                            # 記録開始
+                            if not streaming_client.is_recording:
+                                print("\n[Enter押下] 記録開始...")
+                                streaming_client.start_recording()
+                                recording_state = 'recording'
+                                print(f"[DEBUG] 記録状態: is_recording={streaming_client.is_recording}")
+                            else:
+                                print("\n[ERROR] 既に記録中です（予期しない状態）")
+                        
+                        elif recording_state == 'recording':
+                            # 全0行を挿入
+                            print("\n[Enter押下] 全0行を挿入...")
+                            if streaming_client.recording_data:
+                                zero_row = [0 if isinstance(x, (int, float)) else '0' for x in streaming_client.recording_data[0]]
+                            else:
+                                zero_row = [0] * 9  # timestamp, id, pos_x, pos_y, pos_z, qx, qy, qz, qw
+                            streaming_client.recording_data.append(zero_row)
+                            recording_state = 'zero_inserted'
+                            print(f"[DEBUG] 全0行を追加しました")
+                            print(f"[DEBUG] 現在のデータ行数: {len(streaming_client.recording_data)}")
+                        
+                        elif recording_state == 'zero_inserted':
+                            # 記録停止
+                            if streaming_client.is_recording:
+                                print("\n[Enter押下] 記録終了...")
+                                streaming_client.stop_recording()
+                                recording_state = None
+                                print(f"[DEBUG] 記録状態: is_recording={streaming_client.is_recording}")
+                            else:
+                                print("\n[ERROR] 記録が停止しています（予期しない状態）")
+                                recording_state = None
+                    
+                    except Exception as e:
+                        print(f"[ERROR] エンター処理エラー: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        recording_state = None
                 # qキー
                 elif key in [b'q', b'Q']:
                     print("\n[q押下] プログラム終了...")
@@ -167,7 +181,7 @@ def keyboard_monitor():
                 # hキー
                 elif key in [b'h', b'H']:
                     print("\n--- ヘルプ ---")
-                    print("  Enter: 1回目 記録開始 / 2回目 全0行挿入 / 3回目 記録停止")
+                    print("  Enter: トグル (記録開始 → 全0行挿入 → 記録停止)")
                     print("  q: プログラム終了")
                     print("  h: このヘルプを表示")
                     print("--------------\n")
@@ -179,7 +193,9 @@ def keyboard_monitor():
             streaming_client.shutdown()
             break
         except Exception as e:
-            print(f"キーボード監視エラー: {e}")
+            print(f"[ERROR] キーボード監視エラー: {e}")
+            import traceback
+            traceback.print_exc()
             time.sleep(0.1)
 
 
