@@ -1,669 +1,308 @@
-# Motive-ArduPilot 時刻同期システム 最終設計ドキュメント
+# GPS_NED_w_timestamp 設計資料
+
+## 1. 概要
+
+Motive（モーションキャプチャシステム）から受信した剛体の位置・姿勢データを、UDP経由で各ドローンのRaspiに送信するSDK。
+
+Raspi側では受信したデータをMAVLink（`GPS_INPUT` / `SYSTEM_TIME`）に変換し、ArduPilotに渡すことでドローンのローカルポジショニングを実現する。
 
 ---
 
-## 1. システム全体アーキテクチャ
+## 2. システム構成
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                         Motive PC (Windows)                               │
-│  ┌─────────────┐    ┌──────────────────┐    ┌───────────────────────┐    │
-│  │ OptiTrack    │───▶│ NatNetClient.py  │───▶│ UDP送信 (struct 31B)  │    │
-│  │ Motive       │    │ ・座標変換       │    │ ポート: 15769         │    │
-│  │ (50Hz stream)│    │ ・時刻同期       │    │ プロトコル: struct    │    │
-│  └─────────────┘    │ ・GPS変換        │    │ '<BiiiHdd'            │    │
-│                      └──────────────────┘    └───────────┬───────────┘    │
-└──────────────────────────────────────────────────────────┼──────────────┘
-                                                           │
-                                          Ethernet / Wi-Fi  │
-                                          UDP 31-byte binary │
-                                                           │
-┌──────────────────────────────────────────────────────────┼──────────────┐
-│                      Raspberry Pi 5                       ▼               │
-│  ┌──────────────────┐    ┌──────────────────┐    ┌───────────────────┐   │
-│  │ UDP受信          │───▶│ PeriodicSender   │───▶│ MAVLink送信       │   │
-│  │ (50Hz受信)       │    │ (15Hz定期送信)   │    │ /dev/ttyAMA0      │   │
-│  │ struct.unpack    │    │ ・SYSTEM_TIME    │    │ 1Mbps, RTS/CTS    │   │
-│  │ '<BiiiHdd'       │    │ ・GPS_INPUT      │    │                   │   │
-│  └──────────────────┘    └──────────────────┘    └─────────┬─────────┘   │
-└────────────────────────────────────────────────────────────┼────────────┘
-                                                             │
-                                                    UART TX/RX │
-                                                             │
-┌────────────────────────────────────────────────────────────┼────────────┐
-│                       Pixhawk 6C                            ▼             │
-│  ┌──────────────────┐    ┌──────────────────┐    ┌───────────────────┐   │
-│  │ MAVLink受信      │───▶│ EKF3 (推定)      │───▶│ フライト制御      │   │
-│  │ ・SYSTEM_TIME    │    │ ・GPS融合         │    │                   │   │
-│  │ ・GPS_INPUT      │    │ ・Observer補正    │    │                   │   │
-│  └──────────────────┘    └──────────────────┘    └───────────────────┘   │
-│                                                                          │
-│  設定: GPS1_TYPE=14 (MAVLink GPS Input)                                  │
-│        EK3_SRC1_POSXY=3 (GPS)                                            │
-└──────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│  Motive PC (Windows)                            │
+│                                                 │
+│  Motive ──(NatNet)──▶ PythonSample.py          │
+│                         │                       │
+│                         │ NatNetClient          │
+│                         │ (50Hz: GPS_INPUT用)   │
+│                         │ (50Hz: SYSTEM_TIME用) │
+│                         │                       │
+│            ┌────────────┼────────────┐          │
+│            ▼            ▼            ▼          │
+│       UDP socket   UDP socket   UDP socket      │
+│       (永続)       (永続)       (永続)          │
+│            │            │            │          │
+└────────────┼────────────┼────────────┼──────────┘
+             │            │            │
+       Ethernet/WiFi  (異なるIPアドレス)
+             │            │            │
+             ▼            ▼            ▼
+┌────────────┴────────────┴────────────┴──────────┐
+│  Drone Network                                   │
+│                                                 │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐    │
+│  │ Raspi A  │   │ Raspi B  │   │ Raspi C  │    │
+│  │(192.168. │   │(192.168. │   │(192.168. │    │
+│  │  x.x.10) │   │  x.x.20) │   │  x.x.30) │    │
+│  │ 剛体 ID=1│   │ 剛体 ID=2│   │ 剛体 ID=3│    │
+│  │          │   │          │   │          │    │
+│  │UDP受信   │   │UDP受信   │   │UDP受信   │    │
+│  │  ↓       │   │  ↓       │   │  ↓       │    │
+│  │MAVLink→  │   │MAVLink→  │   │MAVLink→  │    │
+│  │FlightCtrl│   │FlightCtrl│   │FlightCtrl│    │
+│  └──────────┘   └──────────┘   └──────────┘    │
+│       │              │              │            │
+│       ▼              ▼              ▼            │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐    │
+│  │Drone A   │   │Drone B   │   │Drone C   │    │
+│  │(gps_id=1)│   │(gps_id=2)│   │(gps_id=3)│    │
+│  └──────────┘   └──────────┘   └──────────┘    │
+│                                                 │
+└─────────────────────────────────────────────────┘
 ```
 
-### 各ノードの役割
+### 設計上のポイント
 
-| ノード | 役割 | キーファイル |
-|--------|------|-------------|
-| **Motive PC** | OptiTrackから剛体データ取得、座標変換(Motive→NED→GPS)、高精度タイムスタンプ付与、UDPバイナリ送信 | `NatNetClient.py` L946-1045 |
-| **Raspberry Pi 5** | UDP受信(50Hz)、15Hz間引き+定期送信、MAVLink `SYSTEM_TIME`+`GPS_INPUT` 送信 | `send_GPS2.py` L250-347 |
-| **Pixhawk 6C** | MAVLink受信、RTC設定(`SYSTEM_TIME`)、EKF3 GPS融合(`GPS_INPUT`) | GPS1_TYPE=14 |
-
+- **各ドローンには1台のRaspiが搭載されている**
+- **各Raspiには自機の剛体データのみが届く**（SDK側でIPルーティング）
+- 不要なデータをドローンに送らないことで、ネットワーク帯域とRaspiのCPU負荷を最小化
 
 ---
 
-## 2. 時刻同期の設計思想
+## 3. データフロー
 
-### 2.1 なぜ時刻同期が必要か：「分断された時計」問題
-
-```
-【問題: 時刻同期なしの場合】
-
- Motive PC                     Raspberry Pi 5               Pixhawk 6C
- ═══════                       ══════════════               ══════════
-                                                          
- Motiveタイマー                Python time.time()           STM32 RTC
- (ソフトウェアタイマー)         (OSクロック)                 (ハードウェアRTC)
-      │                              │                          │
-      │  t=100.000s                  │                          │
-      │  ──────────▶ UDP送信 ──────▶ │ t=1738138400.123         │
-      │                              │ ───▶ GPS_INPUT ────────▶ │ t=?????
-      │                              │                          │
-      ▼                              ▼                          ▼
-  時刻の基準がバラバラ！ どのデータが「いつ」のものか特定不能！
-```
-
-**「分断された時計」問題**: 3つのノードがそれぞれ独立した時計を持ち、
-- Motive の `timestamp` (ソフトウェアタイマー、0.000s からの相対秒)
-- Raspberry Pi の `time.time()` (Unixエポック、1970-01-01 からの絶対秒)
-- Pixhawk の RTC (ハードウェアRTC、起動時不定)
-
-これらを相互に変換する仕組みが必要。
-
-### 2.2 基準時刻方式：起動時キャリブレーション + フレーム毎補間
+### 3.1 全体の流れ
 
 ```
-【解決策: 基準時刻方式】
-
-  起動時（最初の1フレームのみ）:
-  ┌─────────────────────────────────────────────────────────────┐
-  │                                                             │
-  │   Motiveタイマー                    Unixエポック            │
-  │   (t=0 からの相対秒)                (1970年からの絶対秒)     │
-  │        │                                  │                 │
-  │   base_motive_ts ───────── 同時刻 ──── base_unix            │
-  │   (例: 123.456789)              (例: 1738138223.456789)     │
-  │                                                             │
-  │   time.time() はこの1回だけ呼び出し                          │
-  └─────────────────────────────────────────────────────────────┘
-
-  フレーム毎（50Hz）:
-  ┌─────────────────────────────────────────────────────────────┐
-  │                                                             │
-  │   unix_ts = base_unix + (motive_ts - base_motive_ts)        │
-  │                  ↑                    ↑                     │
-  │            起動時のUnix時刻      Motive高精度タイマー        │
-  │            (定数オフセット)      による経過時間              │
-  │                                                             │
-  │   motive_ts = 124.556789  (フレームサフィックスから取得)     │
-  │   → unix_ts = 1738138223.456789 + (124.556789-123.456789)   │
-  │             = 1738138224.556789                              │
-  └─────────────────────────────────────────────────────────────┘
+Motive (50Hz) → NatNetClient → 剛体IDでルーティング → UDP → Raspi → MAVLink → ArduPilot
 ```
 
-**コード実装**（`NatNetClient.py` L959-966）:
+### 3.2 送信データの種類と周期
 
-```python
-# 修正4: 基準時刻同期（初回フレームで1回だけ設定）
-if self.base_motive_ts is None:
-    self.base_motive_ts = timestamp          # Motiveタイマー値
-    self.base_unix = time.time()             # Unix時刻（1回だけ！）
-    print(f"[TimeSync] Base motive_ts={timestamp:.6f}, base_unix={self.base_unix:.6f}")
+| データ種別 | MAVLinkメッセージ | SDK→Raspi送信周期 | Raspi→ArduPilot送信周期 | 内容 |
+|-----------|-------------------|-------------------|--------------------------|------|
+| GPS位置情報 | `GPS_INPUT` | **50Hz** | **50Hz**（そのまま転送） | 位置(NED)、速度、姿勢（不使用） |
+| システム時刻 | `SYSTEM_TIME` | **50Hz** | **3Hz**（5回に1回に間引き） | `time.time_ns()` で取得した現在時刻 |
 
-# Unix時刻を計算（Motive高精度タイマーでフレーム間隔を保証）
-unix_time_sec = self.base_unix + (timestamp - self.base_motive_ts)
-```
+### 3.3 タイムスタンプの考え方
 
+- **Motiveからは時刻データが送られてこない**
+- そのため、SDK側で `time.time_ns()` を使用してシステム時刻を取得し、`SYSTEM_TIME` に格納して送信する
+- `GPS_INPUT` の `time_usec` フィールドは **ArduPilot側で一切使用されない**ため、デフォルト値（0）のままでよい
+- SDK側では GPS / SYSTEM_TIME ともに **50Hz で送信**（間引きなし）。Raspi側で SYSTEM_TIME のみ **5回に1回（3Hz）** に間引いて ArduPilot に転送する
+- SYSTEM_TIME は ArduPilot の時刻同期用であり、高頻度である必要はない。3Hz で十分
 
-
-### 2.3 Motiveタイマーの高精度性
-
-Motive の `timestamp` は NatNet フレームサフィックスに含まれる **ソフトウェアタイマー値** です。
-
-| 特性 | Motiveタイマー | Python `time.time()` | Python `perf_counter` |
-|------|---------------|---------------------|----------------------|
-| 分解能 | double (float64) | float64 | float64 |
-| 精度 | **サブμs** (高精度イベントタイマー) | ±1-15ms (OSジッタ) | ±1μs |
-| 絶対時刻 | ❌ 相対秒のみ | ✅ Unixエポック | ❌ 任意の基準点 |
-| フレーム間隔精度 | **極めて高い** | 低い (OSジッタ) | 高い |
-| 使用回数 | 毎フレーム | **1回のみ** (起動時) | 不使用 |
-
-**設計判断**: 
-- `time.time()` は起動時の「絶対時刻アンカー」として**1回だけ**使用
-- フレーム間の時間経過は Motiveタイマーの差分で計算（高精度）
-- `perf_counter` は不要。Motiveタイマーで十分
-
-```
-time.time() のジッタ (±15ms) が入るのは base_unix の定数オフセットのみ。
-フレーム間の相対時間は Motiveタイマーが保証するため、
-時刻の「間隔」は高精度、「絶対値」にのみ ±15ms の定数誤差が乗る。
-```
+> **参考**: ArduPilot の `AP_GPS_MAV` は `GPS_INPUT.time_usec` を参照せず、受信時刻を自前で記録する。
+> `SYSTEM_TIME` は `system_time_unix_usec` フィールドを持ち、ArduPilot 全体の時刻基準として使用される。
 
 ---
 
-## 3. 発見されたバグと修正
+## 4. UDP通信仕様
 
-### 3.1 timestamp=-1 バグ（修正1）
+### 4.1 ルーティング方式
 
-**原因**: 剛体データの処理順序が間違っていた。
+**SDK側ルーティング（現行方式）**
 
-```
-【バグありコードのフロー（修正前）】
+`config.json` の `udp_targets` で剛体IDと送信先IPアドレスをマッピングする。
 
-  __unpack_mocap_data():
-  │
-  ├── 1. __unpack_frame_prefix_data()    ← フレーム番号のみ
-  ├── 2. __unpack_marker_set_data()
-  ├── 3. __unpack_rigid_body_data()      ← ★ここで剛体をアンパック
-  │       │
-  │       └── for rb in rigid_body_list:
-  │              process_and_send(rb)    ← ★timestamp未確定のまま送信！
-  │                                        self.current_frame_timestamp = -1
-  │
-  ├── 4. __unpack_skeleton_data()
-  ├── 5. __unpack_labeled_marker_data()
-  ├── 6. __unpack_force_plate_data()
-
-**修正後のフロー**（`NatNetClient.py` L955-1018）:
-
-```
-【修正後のコードフロー】
-
-  __unpack_mocap_data():
-  │
-  ├── 1. __unpack_frame_prefix_data()
-  ├── 2. __unpack_marker_set_data()
-  ├── 3. __unpack_rigid_body_data()      ← 剛体データを蓄積（処理しない）
-  ├── 4. __unpack_skeleton_data()
-  ├── 5. __unpack_labeled_marker_data()
-  ├── 6. __unpack_force_plate_data()
-  ├── 7. __unpack_device_data()
-  ├── 8. __unpack_frame_suffix_data()    ← ★先にtimestampを取得
-  │       self.current_frame_timestamp = timestamp
-  │
-  └── 9. ★タイムスタンプ確定後に剛体データを一括処理
-         base_motive_ts 初期化（初回のみ）
-         unix_time_sec 計算
-         for rb in rigid_body_list:     ← 正しいタイムスタンプ付きで処理
-            GPS変換 → UDP送信
-```
-
-### 3.2 修正の要点
-
-| 修正番号 | 内容 | ファイル:行 |
-|---------|------|------------|
-| 修正1 | 剛体データ蓄積→タイムスタンプ確定後→一括処理 | `NatNetClient.py` L955-1018 |
-| 修正2 | UDPソケット永続化（毎回close/openしない） | `NatNetClient.py` L99-100, L228-234 |
-| 修正3 | pickle→struct バイナリ化（31バイト固定長） | `NatNetClient.py` L241-251 |
-| 修正4 | 基準時刻同期（base_motive_ts + base_unix） | `NatNetClient.py` L959-966 |
-| 修正5 | CSVに両方のタイムスタンプを記録 | `NatNetClient.py` L330-331, L976-982 |
-
----
-
-## 4. UDPプロトコル仕様
-
-### 4.1 バイナリレイアウト（31バイト固定長）
-
-```
-Byte offset:  0        1        5        9        13       15       23       31
-
-### 4.2 フィールド詳細
-
-| フィールド | 型 | ビット幅 | 単位 | 意味 | 例 |
-|-----------|-----|---------|------|------|-----|
-| `rigid_body_id` | `uint8` | 8 | — | OptiTrack剛体ID | `1` |
-| `gps_lat` | `int32` | 32 | degE7 (度×10⁷) | GPS緯度 | `360757801` (=36.0757801°) |
-| `gps_lon` | `int32` | 32 | degE7 (度×10⁷) | GPS経度 | `1362132945` (=136.2132945°) |
-| `gps_alt` | `int32` | 32 | mm (ミリメートル) | GPS高度 | `1234` (=1.234m) |
-| `yaw_cdeg` | `uint16` | 16 | cdeg (度×100) | ヨー角 | `12345` (=123.45°) |
-| `motive_timestamp` | `float64` | 64 | 秒 | Motive高精度タイマー値 | `123.456789` |
-| `unix_time_sec` | `float64` | 64 | 秒 (Unix epoch) | 変換後Unix時刻 | `1738138224.557` |
-
-### 4.3 エンディアン
-
-リトルエンディアン (`<`)。x86/x64 (Motive PC) および ARM (Raspberry Pi) のネイティブバイトオーダー。
-
-### 4.4 pickle → struct 改善効果
-
-```
-【改善前: pickle シリアライズ】
-  サイズ: ~300-600 bytes（変動）
-  形式:  Python独自形式（他言語から読めない）
-  速度:  遅い（オブジェクトシリアライズ+デシリアライズ）
-  安全性: pickle.loads は任意コード実行の脆弱性あり
-
-【改善後: struct バイナリ】
-  サイズ: 31 bytes（固定長）
-  形式:  言語非依存のバイナリ（C/Rust/Go等からも読める）
-  速度:  速い（メモリコピー+バイトオーダー変換のみ）
-  安全性: 完全に安全（固定フォーマット）
-```
-
-**送信側**（`NatNetClient.py` L241-251）:
-```python
-serialized = struct.pack('<BiiiHdd',
-                         rigid_body_id,
-                         gps_lat_degE7,
-                         gps_lon_degE7,
-                         gps_alt_mm,
-                         yaw_cdeg,
-                         motive_timestamp,
-                         unix_time_sec)
-```
-
-**受信側**（`send_GPS2.py` L138）:
-```python
-unpacked = struct.unpack('<BiiiHdd', data[:31])
-rigid_body_id, lat_e7, lon_e7, alt_mm, yaw_cdeg, motive_timestamp, unix_time_sec = unpacked
-```
-
-            ┌────────┬────────┬────────┬────────┬────────┬────────┬────────┐
-            │  B     │  i     │  i     │  i     │  H     │  d     │  d     │
-            │uint8   │ int32  │ int32  │ int32  │uint16  │float64 │float64 │
-            ├────────┼────────┼────────┼────────┼────────┼────────┼────────┤
-   Value:   │ rb_id  │lat_e7  │lon_e7  │alt_mm  │yaw_cdeg│motive_ts│unix_ts │
-            └────────┴────────┴────────┴────────┴────────┴────────┴────────┘
-             1B       4B       4B       4B       2B       8B       8B
-
-   struct format: '<BiiiHdd'  (リトルエンディアン)
-   合計: 1 + 4 + 4 + 4 + 2 + 8 + 8 = 31 bytes
-```
-
----
-
-## 5. ArduPilotの時刻処理（調査結果）
-
-### 5.1 GPS_INPUT.time_usec は完全無視される
-
-```
-GPS_INPUT メッセージ:
-┌──────────────────────────────────────────────────────────────┐
-│ time_usec        ← ★EKFはまったく参照しない！                │
-│ gps_id           ← GPSインスタンスID                         │
-│ ignore_flags     ← ビットマスク                              │
-│ time_week_ms     ← GPS週+ミリ秒（代わりにこれを使う）        │
-│ time_week        ←                                            │
-│ fix_type         ← 3=3D Fix                                  │
-│ lat, lon, alt    ← 緯度・経度・高度                          │
-│ ...                                                          │
-└──────────────────────────────────────────────────────────────┘
-
-EKF内部では time_usec が参照されるコードパスが存在しないことが
-ArduPilotソースコード調査で確認された。
-```
-
-### 5.2 SYSTEM_TIME が RTC を設定する
-
-```
-SYSTEM_TIME メッセージ:
-┌──────────────────────────────────────────────────────────────┐
-│ time_unix_usec   ← Unixエポック（μs単位）                    │
-│ time_boot_ms     ← ブートからの経過時間（ms）                │
-└──────────────────────────────────────────────────────────────┘
-
-ArduPilot内部処理:
-  SYSTEM_TIME受信
-       │
-       ▼
-  AP_RTC.set_utc_usec(time_unix_usec)
-       │
-       ▼
-  RTC.epoch_us = time_unix_usec / 1_000_000  ← Unix時刻（秒）
-  RTC.TimeUS   = AP_HAL::micros()            ← その時のブート時間（μs）
-```
-
-**送信コード**（`send_GPS2.py` L93-108）:
-```python
-def send_system_time(self, unix_time_sec):
-    time_unix_usec = int(unix_time_sec * 1_000_000)
-    self.master.mav.system_time_send(
-        time_unix_usec,   # Motive基準のUnix時刻
-        0                 # time_boot_ms
-    )
-```
-
-### 5.3 RTCログとGPSログの突合方法
-
-```
-【RTC と GPS の関係図】
-
-  SYSTEM_TIME到着時刻
-       │
-       ├── RTC.epoch_us = unix_time_sec (秒単位のUnix時刻)
-       └── RTC.TimeUS   = AP_HAL::micros() (その時のブート時間)
-
-  GPSデータ到着時:
-       GPS.TimeUS はブート時間（AP_HAL::micros()）で記録される
-
-  GPSの絶対時刻を求めるには:
-       GPS絶対時刻(Unix秒) = RTC.epoch_us + (GPS.TimeUS - RTC.TimeUS)
-                              \___________/   \________________________/
-                               基準時刻        RTC設定時からの経過時間
-```
-
-**Raspberry Pi側の送信順序**（`send_GPS2.py` L221-224）:
-```python
-# 最初にSYSTEM_TIME送信（ArduPilotのRTCをMotive Unix時刻に設定）
-self.ardupilot.send_system_time(self.latest_data['unix_time_sec'])
-# 次にGPS_INPUT送信
-success = self.ardupilot.send_gps_input(...)
-```
-
-SYSTEM_TIMEをGPS_INPUTの**直前に**送信することで、RTCが最新のUnix時刻で更新された状態でGPSデータが到着する。
-
-
-  ├── 7. __unpack_device_data()
-  └── 8. __unpack_frame_suffix_data()    ← ★ここでやっとtimestamp取得
-          self.current_frame_timestamp = timestamp  ← 手遅れ！
-
----
-
-## 6. データフロー詳細
-
-### 6.1 Motive PC側の処理パイプライン
-
-```
-  Motive 50Hz データ到着
-       │
-       ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │ 1. NatNet パケット受信 (data_socket, port 1511)         │
-  │    __data_thread_function()                             │
-  └──────────────────────────┬──────────────────────────────┘
-                             │
-                             ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │ 2. データアンパック                                      │
-  │    __unpack_mocap_data():                               │
-  │    ├── Frame Prefix (frame_number)                      │
-  │    ├── MarkerSet Data                                   │
-  │    ├── Rigid Body Data ← 蓄積のみ（処理しない）          │
-  │    ├── Skeleton Data                                    │
-  │    ├── Labeled Marker Data                              │
-  │    ├── Force Plate Data                                 │
-  │    ├── Device Data                                      │
-  │    └── Frame Suffix Data ← timestamp ここで取得         │
-  └──────────────────────────┬──────────────────────────────┘
-                             │
-                    timestamp 確定
-                    base_motive_ts / base_unix 初期化（初回のみ）
-                    unix_time_sec = base_unix + (ts - base_motive_ts)
-                             │
-                             ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │ 3. 剛体ごとの処理ループ                                  │
-  │    for rb in rigid_body_data.rigid_body_list:           │
-  │    ┌─────────────────────────────────────────────────┐  │
-  │    │ a. Motive座標系 → NED座標系 変換                  │  │
-  │    │    motive_to_ned()   [L165-180]                  │  │
-  │    │    X(北)→N, Z(東)→E, Y(上)→D(符号反転)           │  │
-  │    ├─────────────────────────────────────────────────┤  │
-  │    │ b. NED座標系 → GPS座標系 変換                     │  │
-  │    │    ned_to_gps()   [L182-204]                     │  │
-  │    │    pyned2lla.ned2lla() を使用                     │  │
-  │    ├─────────────────────────────────────────────────┤  │
-  │    │ c. クォータニオン → Yaw角                         │  │
-  │    │    quaternion_to_yaw_degrees()  [L206-226]       │  │
-  │    ├─────────────────────────────────────────────────┤  │
-  │    │ d. 整数表現に変換                                  │  │
-  │    │    lat_e7 = int(round(lat * 1e7))               │  │
-  │    │    lon_e7 = int(round(lon * 1e7))               │  │
-  │    │    alt_mm = int(round(alt * 1000))              │  │
-  │    │    yaw_cdeg = int(round(yaw * 100))             │  │
-  │    ├─────────────────────────────────────────────────┤  │
-  │    │ e. struct バイナリにパック                          │  │
-  │    │    struct.pack('<BiiiHdd', ...) → 31 bytes     │  │
-  │    ├─────────────────────────────────────────────────┤  │
-  │    │ f. UDP送信                                        │  │
-  │    │    sock.sendto(data, (target_ip, 15769))        │  │
-  │    └─────────────────────────────────────────────────┘  │
-  └─────────────────────────────────────────────────────────┘
-```
-
-```
-
-
-### 6.2 Raspberry Pi側の処理パイプライン
-
-```
-  UDPデータ受信 (50Hz)
-       │
-       ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │ 1. UDP受信 (ノンブロッキング)                             │
-  │    struct.unpack('<BiiiHdd', data[:31])                │
-  │    → (rb_id, lat_e7, lon_e7, alt_mm, yaw_cdeg,          │
-  │       motive_ts, unix_ts)                               │
-  └──────────────────────────┬──────────────────────────────┘
-                             │
-                    latest_data 更新（スレッドセーフ）
-                             │
-                             ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │ 2. 定期送信ループ (15Hz, 66.67ms間隔)                    │
-  │    PeriodicSender._send_loop():                         │
-  │                                                         │
-  │    高精度タイミング制御:                                  │
-  │      next_send_time += interval (66.67ms)               │
-  │      time.sleep(sleep_time - 0.001)                    │
-  │      while time.time() < next_send_time: pass (busy)   │
-  │                                                         │
-  │    送信順序（重要！）:                                    │
-  │      a. SYSTEM_TIME 送信                                │
-  │         → PixhawkのRTCをMotive Unix時刻に設定            │
-  │      b. GPS_INPUT 送信                                  │
-  │         → 位置・高度・Yaw角をEKFに注入                   │
-  └─────────────────────────────────────────────────────────┘
-```
-
-### 6.3 CSV記録形式
-
-Motive PC側で記録（`NatNetClient.py` L329-335, L975-982）:
-
-```
-CSVヘッダー:
-  motive_timestamp, unix_time_sec, rigid_body_id,
-  pos_x, pos_y, pos_z,
-  qx, qy, qz, qw
-
-サンプル行:
-  123.456789, 1738138224.556789, 1,
-  1.234, 2.345, 0.123,
-  0.000, 0.000, 0.707, 0.707
-```
-
-| カラム | 説明 | 単位 |
-|--------|------|------|
-| `motive_timestamp` | Motive高精度タイマー値 | 秒 |
-| `unix_time_sec` | 変換後Unix時刻 | 秒 |
-| `rigid_body_id` | 剛体ID | — |
-| `pos_x, pos_y, pos_z` | Motive生座標 | m |
-| `qx, qy, qz, qw` | Motive生クォータニオン | — |
-
-### 6.4 複数剛体IDの扱い
-
-```
-config.json:
+```json
 {
-    "udp_targets": {
-        "1": "192.168.11.16",    ← RB#1 → Pixhawk #1
-        "2": "192.168.11.61"     ← RB#2 → Pixhawk #2
+  "udp_targets": {
+    "1": "192.168.1.10",
+    "2": "192.168.1.20",
+    "3": "192.168.1.30"
+  },
+  "udp_port": 15769
+}
+```
+
+- 剛体 ID=1 のデータ → `192.168.1.10:15769` に送信
+- 剛体 ID=2 のデータ → `192.168.1.20:15769` に送信
+- マッピングにない剛体IDのデータは送信しない
+
+### 4.2 ソケット管理（改善設計）
+
+**現在の問題点**: 毎フレーム `socket()` → `sendto()` → `close()` を実行している。
+50Hz × 剛体数（例: 3機）= **秒間150回のソケット生成/破棄**が発生し、非効率。
+
+**改善案**: `__init__` で宛先IPごとに **永続UDPソケットを1つだけ作成**し、全フレームで使い回す。
+
+```python
+# __init__ で作成（1回のみ）
+self.udp_sockets = {}  # {target_ip: socket}
+for rigid_id, target_ip in self.udp_targets.items():
+    if target_ip not in self.udp_sockets:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_sockets[target_ip] = sock
+
+# send_udp_data では sendto のみ
+def send_udp_data(self, data, target_ip, rigid_body_id):
+    try:
+        sock = self.udp_sockets[target_ip]
+        serialized = pickle.dumps(data)
+        sock.sendto(serialized, (target_ip, self.udp_port))
+    except Exception as e:
+        print(f"UDP send error: {e}")
+```
+
+- UDP はコネクションレスなので、1つのソケットで任意の宛先に `sendto()` 可能
+- ただし、宛先IPごとにソケットを分けることで、送信先の識別とエラーハンドリングが容易になる
+- 破棄は `shutdown()` 時に一括で行う
+
+### 4.3 データフォーマット（pickle）
+
+受信側（Raspi）もPythonであるため、`pickle` によるシリアライズを継続使用する。
+
+**GPS_INPUT 用データ（50Hz）**
+
+```python
+{
+    "type": "gps",
+    "rigid_body_id": 1,
+    "pos": [x, y, z],      # NED座標 [m]
+    "vel": [vx, vy, vz],   # NED速度 [m/s]
+}
+```
+
+- `time_usec` は含めない（ArduPilot側で不使用のため）
+- 位置は Motive のグローバル座標を NED に変換したもの
+
+**SYSTEM_TIME 用データ（50Hz 送信、Raspi側で3Hzに間引き）**
+
+```python
+{
+    "type": "system_time",
+    "time_ns": 1717084800000000000,  # time.time_ns() の値
+}
+```
+
+---
+
+## 5. 送信周期の制御
+
+### 5.1 SDK側（Motive PC）
+
+**間引きは行わない。GPS / SYSTEM_TIME ともに 50Hz で Raspi に送信する。**
+
+`NatNetClient.__unpack_rigid_body()` は Motive からフレームが届くたび（50Hz）に呼び出され、GPSデータとSYSTEM_TIMEデータの両方を毎回送信する。
+
+```python
+def __unpack_rigid_body(self, ...):
+    # GPSデータ送信（毎フレーム = 50Hz）
+    gps_data = {
+        "type": "gps",
+        "rigid_body_id": new_id,
+        "pos": [x, y, z],
+        "vel": [vx, vy, vz],
     }
+    self.send_udp_data(gps_data, target_ip, new_id)
+    
+    # SYSTEM_TIME送信（毎フレーム = 50Hz、間引きなし）
+    system_time_data = {
+        "type": "system_time",
+        "time_ns": time.time_ns()
+    }
+    self.send_udp_data(system_time_data, target_ip, new_id)
+```
+
+### 5.2 Raspi側
+
+Raspi側で受信したデータを以下の周期で ArduPilot に転送する。
+
+| データ | SDK→Raspi周期 | Raspi→ArduPilot周期 | 実装方針 |
+|--------|--------------|---------------------|---------|
+| `GPS_INPUT` | 50Hz | **50Hz** | 受信したGPSデータをそのままMAVLink送信 |
+| `SYSTEM_TIME` | 50Hz | **3Hz** | 受信カウンタで間引き（5回に1回のみMAVLink送信） |
+
+```python
+# Raspi側 間引きロジック
+gps_frame_count = 0
+
+while True:
+    data, addr = sock.recvfrom(4096)
+    msg = pickle.loads(data)
+    
+    if msg["type"] == "gps":
+        gps_frame_count += 1
+        # GPS_INPUT は毎回送信（50Hz）
+        send_mavlink_gps_input(msg["pos"], msg["vel"])
+    
+    elif msg["type"] == "system_time":
+        # SYSTEM_TIME は GPS 5回に1回だけ送信（50/5 = 10Hz...ではなく 3Hz）
+        # GPS_INPUT 送信回数を基準に間引く
+        if gps_frame_count % 5 == 0:
+            send_mavlink_system_time(msg["time_ns"])
+```
+
+> GPS_INPUT 50Hz / 5 = 10Hz だが、実装上は GPS_INPUT の送信回数をカウントして5回に1回送る方式。
+> 必要に応じてカウンタの除数を調整可能。
 
 ---
 
-## 7. 精度の考察
+## 6. Raspi側の処理（参考）
 
-### 7.1 誤差モデル
+Raspi側の受信スクリプトは以下の流れで動作する：
 
-```
-                    ┌─────────────────────────────┐
-                    │  真のUnix時刻                │
-                    │  (原子時計などの理想値)       │
-                    └─────────────┬───────────────┘
-                                  │
-                    ┌─────────────┼───────────────┐
-                    │             │               │
-                    ▼             ▼               ▼
-           ┌──────────┐  ┌──────────────┐  ┌──────────────┐
-           │ 絶対誤差  │  │ 相対誤差     │  │ ジッタ      │
-           │ ±15ms    │  │ サブμs       │  │ 0            │
-           │ (定数)   │  │ (Motive精度) │  │ (Motive精度) │
-           └──────────┘  └──────────────┘  └──────────────┘
-```
+1. UDP ソケットで `pickle` データを受信
+2. `type` フィールドでメッセージ種別を判定
+   - `"gps"` → `GPS_INPUT` MAVLinkメッセージを生成・送信
+   - `"system_time"` → `SYSTEM_TIME` MAVLinkメッセージを生成・送信
+3. MAVLinkメッセージを Flight Controller にシリアル経由で送信
 
-### 7.2 誤差の内訳
+```python
+# Raspi側 擬似コード
+import socket, pickle
 
-| 誤差要因 | 種類 | 大きさ | 説明 |
-|---------|------|--------|------|
-| `time.time()` のOSジッタ | 絶対オフセット（定数） | **±15ms** | 起動時の1回のみ発生。全フレームに等しく加算 |
-| Motiveタイマー精度 | 相対精度 | **サブμs** | フレーム間隔の計測に使用。極めて高精度 |
-| UDPネットワーク遅延 | 絶対オフセット | 0.1-1ms | Ethernetの場合は極小 |
-| struct パック/アンパック | 変換誤差 | **0** | 整数変換による丸め誤差のみ（degE7, mm, cdeg） |
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("0.0.0.0", 15769))
 
-### 7.3 絶対精度（±15msの定数オフセット）
-
-```
-unix_ts = base_unix + (motive_ts - base_motive_ts)
-          \______/
-          ±15ms の誤差を含む（time.time()のジッタ）
-
-この誤差は base_unix にのみ含まれ、全フレームで一定。
-→ ログ解析時に 15ms の定数バイアスとして扱える
-→ 制御周期（50Hz=20ms）に対しては許容範囲
-```
-
-### 7.4 相対精度（Motiveタイマーによるサブμs）
-
-```
-フレーム間隔の精度:
-  Δt = motive_ts[n] - motive_ts[n-1]
-  
-  期待値: 20.000ms (50Hz)
-  ジッタ: サブμsオーダー
-
-  これは Motive の高精度ソフトウェアタイマーが保証する。
-  Windows の QueryPerformanceCounter ベース。
-```
-
-### 7.5 Pixhawk EKFへの影響
-
-```
-EKF3 のタイムスタンプ要件:
-  - GPSデータの「時刻」は EKF の prediction step との同期に使用
-  - GPS_INPUT.time_usec ではなく RTC/GPS.TimeUS が使われる
-  - 15ms の定数オフセットは EKF の innovation に影響しない
-    （相対的なフレーム間隔が正しいため）
-
-  EKF融合パイプライン:
-  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
-  │IMU予測   │───▶│GPS更新   │───▶│姿勢出力  │───▶│制御出力  │
-
----
-
-## 8. ファイル構成と変更内容
-
-### 8.1 ファイル一覧
-
-```
-Motive_SDK/GPS_NED_w_timestamp/     ← Motive PC側（本ディレクトリ）
-├── DESIGN.md                       ★ このドキュメント（新規）
-├── README.md                       概要説明
-├── config.json                     UDP送信先設定
-├── NatNetClient.py                 ★ メインクライアント（全修正を含む）
-├── PythonSample.py                 実行エントリポイント
-├── DataDescriptions.py             NatNetデータ記述クラス
-├── MoCapData.py                    モーキャプデータクラス
-├── PythonClient.pyproj             VSプロジェクトファイル
-└── PythonClient.sln                VSソリューションファイル
-
-Mavlink_raspi/EKF/                  ← Raspberry Pi 5側
-└── send_GPS2.py                    ★ UDP受信+MAVLink送信ブリッジ
-```
-
-### 8.2 削除されたもの
-
-| 削除項目 | 理由 | 代替 |
-|---------|------|------|
-| `pickle` シリアライズ | 可変長・低速・Python依存・脆弱性 | `struct.pack('<BiiiHdd')` (31B固定) |
-| `data_buffer` / `recording_data` の複雑な管理 | バグの温床 | シンプルなリスト蓄積 |
-| 重複フィールド (`data_no`, `frame_time`, `motive_position`, `ned_position` 等) | UDP帯域の無駄 | 必要最低限の6フィールド |
-| `time.perf_counter` | 不要（Motiveタイマーで十分） | Motiveタイマー差分で高精度に計算 |
-
-### 8.3 新規追加されたもの
-
-| 追加項目 | 場所 | 説明 |
-|---------|------|------|
-| `SYSTEM_TIME` 送信 | `send_GPS2.py` L93-108 | ArduPilotのRTC設定 |
-| `base_motive_ts` / `base_unix` | `NatNetClient.py` L103-104 | 基準時刻同期用 |
-| `struct` バイナリプロトコル | `NatNetClient.py` L241-251 | 31バイト固定長フォーマット |
-| 永続UDPソケット | `NatNetClient.py` L99-100, L228-234 | フレーム毎のconnect/disconnect回避 |
-| `unix_time_sec` フィールド | `NatNetClient.py` L966, `send_GPS2.py` L294 | 変換後Unix時刻 |
-| CSV両タイムスタンプ | `NatNetClient.py` L330-331 | motive_ts + unix_ts の両方を保存 |
-
-### 8.4 変更のインパクトまとめ
-
-```
-【変更前】                               【変更後】
-                                        
- Motive PC                               Motive PC
-   pickle 可変長 (~300B)                   struct 31B 固定長
-   timestamp=-1 バグ                       timestamp 正しく伝播
-   時刻同期なし                             基準時刻方式で高精度同期
-   ↓                                      ↓
- Raspberry Pi                            Raspberry Pi
-   pickle 受信                             struct unpack (高速)
-   GPS_INPUT のみ                          SYSTEM_TIME + GPS_INPUT
-   不安定なタイミング                       15Hz 高精度定期送信
-   ↓                                      ↓
- Pixhawk                                 Pixhawk
-   time_usec が不定                        RTC = Unix時刻（SYSTEM_TIME）
-   GPS時刻が不正確                         GPS時刻が正確に突合可能
+while True:
+    data, addr = sock.recvfrom(4096)
+    msg = pickle.loads(data)
+    
+    if msg["type"] == "gps":
+        # GPS_INPUT 送信
+        send_mavlink_gps_input(msg["pos"], msg["vel"])
+    
+    elif msg["type"] == "system_time":
+        # SYSTEM_TIME 送信
+        send_mavlink_system_time(msg["time_ns"])
 ```
 
 ---
 
-## 付録A: 用語集
+## 7. 設定ファイル (config.json)
 
-| 用語 | 説明 |
+```json
+{
+  "udp_targets": {
+    "1": "192.168.1.10",
+    "2": "192.168.1.20",
+    "3": "192.168.1.30"
+  },
+  "udp_port": 15769,
+  "system_time_divider": 5
+}
+```
+
+| 項目 | 説明 |
 |------|------|
-| **Motive** | OptiTrack社のモーションキャプチャソフトウェア |
-| **NatNet** | Motiveが使用するUDPストリーミングプロトコル |
-| **NED** | North-East-Down 座標系（航空機の標準座標系） |
-| **degE7** | 度×10⁷。例: 36.0757801° = 360757801 |
-| **cdeg** | センチ度（度×100）。例: 123.45° = 12345 |
-| **RTC** | Real-Time Clock。Pixhawkのハードウェア時計 |
-| **EKF** | Extended Kalman Filter（拡張カルマンフィルタ） |
-| **MAVLink** | ドローン通信プロトコル |
-| **RTS/CTS** | ハードウェアフロー制御（UART） |
+| `udp_targets` | 剛体ID → 送信先IPアドレスのマッピング |
+| `udp_port` | UDP送信先ポート番号 |
+| `system_time_divider` | Raspi側でSYSTEM_TIMEを間引く除数（デフォルト: 5。GPS 5回に1回 = 50/5 = 10Hz。用途に応じて調整） |
 
-## 付録B: クイックスタート
+---
 
-```bash
-# Motive PC側
-cd /home/taki/Motive_SDK/GPS_NED_w_timestamp/
-python PythonSample.py
+## 8. ファイル構成
 
-# Raspberry Pi側
-cd /home/taki/Mavlink_raspi/EKF/
-python3 send_GPS2.py
+```
+GPS_NED_w_timestamp/
+├── DESIGN.md          ← 本資料
+├── README.md          ← 使用方法
+├── config.json        ← 設定ファイル
+├── PythonSample.py    ← エントリポイント（キーボード監視・記録制御）
+├── NatNetClient.py    ← NatNet通信 + UDP送信（ソケット永続化）
+├── MoCapData.py       ← MoCapデータパース
+└── DataDescriptions.py ← データ記述子
 ```
 
-## 付録C: 参考資料
+---
 
-- ArduPilot MAVLink GPS_INPUT: https://mavlink.io/en/messages/common.html#GPS_INPUT
-- ArduPilot MAVLink SYSTEM_TIME: https://mavlink.io/en/messages/common.html#SYSTEM_TIME
-- OptiTrack NatNet SDK: https://optitrack.com/support/downloads/developer-tools.html
+## 9. 変更履歴
 
+| 日付 | 変更内容 |
+|------|---------|
+| 2026-05-31 | 初版作成。Motiveからのタイムスタンプ未送信に対応。`time.time_ns()` による `SYSTEM_TIME` 送信方式に変更。SDK側はGPS/SYSTEM_TIMEともに50Hzで間引きなし送信。Raspi側でSYSTEM_TIMEをGPS 5回に1回（3Hz）に間引いてArduPilot転送。`GPS_INPUT` から時刻フィールドを削除。ソケット永続化の設計を追加。SDK側ルーティング方式を正式採用。 |
