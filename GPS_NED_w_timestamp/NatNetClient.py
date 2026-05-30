@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import socket
 import struct
 from threading import Thread
@@ -8,6 +8,7 @@ import DataDescriptions
 import MoCapData
 import math
 import pyned2lla
+import pickle
 import json
 import os
 
@@ -93,19 +94,11 @@ class NatNetClient:
         self.data_socket = None
         self.stop_threads=False
 
-        # フレームカウンタ（表示スロットリング用）
-        self.frame_count = 0
-
-        # 永続UDPソケット管理（修正2: ソケット永続化）
-        self.udp_sockets = {}
-
-        # 基準時刻同期（修正4: 初回フレームで設定）
-        self.base_motive_ts = None
-        self.base_unix = None
-
-        # 現在のフレームタイムスタンプ
-        self.current_frame_timestamp = -1
-
+        # データバッファとカウンタ
+        self.data_buffer = {}
+        self.data_No = 0
+        self.time_log = 0
+        
         # **記録機能用変数**
         self.is_recording = False
         self.recording_data = []  # 記録データバッファ
@@ -225,53 +218,50 @@ class NatNetClient:
             print(f"Yaw calculation error: {e}")
             return 0.0
 
-    def _get_udp_socket(self, target_ip):
-        """永続UDPソケットを取得（修正2: ソケット永続化）"""
-        if target_ip not in self.udp_sockets:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(2.0)
-            self.udp_sockets[target_ip] = sock
-        return self.udp_sockets[target_ip]
-
-    def send_udp_data(self, rigid_body_id, gps_lat_degE7, gps_lon_degE7, gps_alt_mm,
-                       yaw_cdeg, motive_timestamp, unix_time_sec, target_ip):
-        """UDP送信（修正3: structバイナリ31バイト、修正2: 永続ソケット）"""
+    def send_udp_data(self, rigid_body_data, target_ip, rigid_body_id):
+        """UDP送信"""
         try:
-            sock = self._get_udp_socket(target_ip)
-            # struct フォーマット: <BiiiHdd (31バイト固定)
-            # uint8 rigid_body_id, int32 gps_lat(degE7), int32 gps_lon(degE7),
-            # int32 gps_alt(mm), uint16 yaw_cdeg, float64 motive_timestamp, float64 unix_time_sec
-            serialized = struct.pack('<BiiiHdd',
-                                     rigid_body_id,
-                                     gps_lat_degE7,
-                                     gps_lon_degE7,
-                                     gps_alt_mm,
-                                     yaw_cdeg,
-                                     motive_timestamp,
-                                     unix_time_sec)
-            bytes_sent = sock.sendto(serialized, (target_ip, self.udp_port))
+            # ソケット作成
+            client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            client.settimeout(2.0)  # 2秒タイムアウト
+            
+            # データシリアライズ
+            serialized_data = pickle.dumps(rigid_body_data)
+            data_size = len(serialized_data)
+            
+            # UDP送信実行
+            bytes_sent = client.sendto(serialized_data, (target_ip, self.udp_port))
+            client.close()
+            
+            # 送信成功
             self.udp_send_count += 1
             return True
-
+            
         except socket.timeout:
             self.udp_error_count += 1
             print(f"✗ UDP timeout to {target_ip}:{self.udp_port} for RB{rigid_body_id}")
             return False
-
+            
         except socket.gaierror as e:
             self.udp_error_count += 1
             print(f"✗ UDP address error to {target_ip}:{self.udp_port} for RB{rigid_body_id}: {e}")
             return False
-
+            
         except ConnectionRefusedError:
             self.udp_error_count += 1
             print(f"✗ UDP connection refused by {target_ip}:{self.udp_port} for RB{rigid_body_id}")
             return False
-
+            
         except Exception as e:
             self.udp_error_count += 1
             print(f"✗ UDP send error to {target_ip}:{self.udp_port} for RB{rigid_body_id}: {e}")
             return False
+        
+        finally:
+            try:
+                client.close()
+            except:
+                pass
 
     def start_recording(self):
         """記録開始"""
@@ -326,10 +316,10 @@ class NatNetClient:
             import csv
             with open(filepath, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                # ヘッダー（修正5: 両方のタイムスタンプを記録）
-                writer.writerow(['motive_timestamp', 'unix_time_sec', 'rigid_body_id',
+                # ヘッダー
+                writer.writerow(['timestamp', 'rigid_body_id', 
                                'pos_x', 'pos_y', 'pos_z',
-                               'qx', 'qy', 'qz', 'qw'])
+                               'quat_x', 'quat_y', 'quat_z', 'quat_w'])
                 # データ
                 for row in self.recording_data:
                     writer.writerow(row)
@@ -564,6 +554,117 @@ class NatNetClient:
 
         trace_mf( "\tOrientation : [%3.2f, %3.2f, %3.2f, %3.2f]"% (rot[0], rot[1], rot[2], rot[3] ))
 
+        # 公式タイムスタンプ（frame_suffix_data.timestamp）を取得
+        official_timestamp = None
+        if hasattr(self, 'current_frame_timestamp'):
+            official_timestamp = self.current_frame_timestamp
+        # **記録機能: Motiveから受信した生データを記録**
+        if self.is_recording:
+            # timestamp, rigid_body_id, pos_x, pos_y, pos_z, quat_x, quat_y, quat_z, quat_w
+            self.recording_data.append([
+                official_timestamp,
+                new_id,
+                pos[0], pos[1], pos[2],
+                rot[0], rot[1], rot[2], rot[3]
+            ])
+
+        # udp_targets.jsonに設定された剛体IDのデータを処理
+        if new_id in self.udp_targets:
+            if new_id == 1:
+                self.time_log = official_timestamp
+
+            # Motive座標系 → NED座標系への変換
+            rel_x, rel_y, rel_z = pos
+            motive_qx, motive_qy, motive_qz, motive_qw = rot
+            
+            ned_x, ned_y, ned_z, ned_qw, ned_qx, ned_qy, ned_qz = self.motive_to_ned(
+                rel_x, rel_y, rel_z,
+                motive_qx, motive_qy, motive_qz, motive_qw
+            )
+
+            # NED → GPS（緯度・経度・高度）の変換
+            gps_lat, gps_lon, gps_alt = self.ned_to_gps(ned_x, ned_y, ned_z)
+            
+            # Yaw角の計算
+            yaw_deg = self.quaternion_to_yaw_degrees([ned_qw, ned_qx, ned_qy, ned_qz])
+
+            # GPS変換が成功した場合
+            if gps_lat is not None:
+                # GPSデータの構築
+                gps_data = {
+                    'status': 'SUCCESS',
+                    'id': new_id,
+                    'latitude': gps_lat,
+                    'longitude': gps_lon,
+                    'altitude': gps_alt,
+                    'yaw_degrees': yaw_deg,
+                    'ned_position': [ned_x, ned_y, ned_z],
+                    'ned_rotation': [ned_qw, ned_qx, ned_qy, ned_qz],
+                    'motive_position': [rel_x, rel_y, rel_z],
+                    'motive_rotation': [motive_qx, motive_qy, motive_qz, motive_qw],
+                    'data_no': self.data_No,
+                    'timestamp': official_timestamp,
+                    'frame_time': official_timestamp
+                }
+                
+                # 50回に1回のみコンソール表示
+                if self.data_No % 50 == 0:
+                    print(f"[Frame {self.data_No}] Sending ID: {new_id}, GPS: ({gps_lat:.7f}, {gps_lon:.7f}, {gps_alt:.3f}), Local Pos: ({rel_x:.3f}, {rel_y:.3f}, {rel_z:.3f})")
+                
+            else:
+                # GPS変換失敗時のデータ
+                gps_data = {
+                    'status': 'GPS_CONVERSION_FAILED',
+                    'id': new_id,
+                    'error_message': 'GPS coordinate conversion failed',
+                    'ned_position': [ned_x, ned_y, ned_z],
+                    'ned_rotation': [ned_qw, ned_qx, ned_qy, ned_qz],
+                    'motive_position': [rel_x, rel_y, rel_z],
+                    'motive_rotation': [motive_qx, motive_qy, motive_qz, motive_qw],
+                    'data_no': self.data_No,
+                    'timestamp': official_timestamp,
+                    'frame_time': official_timestamp
+                }
+                
+                print(f"ERROR: GPS conversion failed for ID {new_id}")
+
+            # **UDP送信実行（毎フレーム = 50Hz）**
+            if new_id in self.udp_targets:
+                target_ip = self.udp_targets[new_id]
+                
+                # 毎フレーム送信（50Hz）
+                success = self.send_udp_data(gps_data, target_ip, new_id)
+                
+                # 50回に1回のみ送信確認表示
+                if self.data_No % 50 == 0:
+                    print(f"[Frame {self.data_No}] GPS data sent to {target_ip} (50Hz)")
+                
+                if not success:
+                    print(f"Failed to send UDP data for RB{new_id} to {target_ip}")
+            else:
+                print(f"WARNING: No UDP target configured for rigid body {new_id}")
+
+            # データをバッファに格納（コンソール表示用）
+            self.data_buffer[new_id] = {
+                'id': new_id,
+                'position': pos,
+                'rotation': rot,
+                'ned_position': [ned_x, ned_y, ned_z],
+                'ned_rotation': [ned_qw, ned_qx, ned_qy, ned_qz],
+                'gps_coords': [gps_lat, gps_lon, gps_alt] if gps_lat is not None else None,
+                'yaw_degrees': yaw_deg,
+                'data_no': self.data_No,
+                'time': official_timestamp
+            }
+
+            # データ番号をインクリメント
+            if new_id == 2:
+                self.data_No = self.data_No + 1
+
+            # IDが1と2のデータが揃ったらコンソール表示（簡略化）
+            if 1 in self.data_buffer and 2 in self.data_buffer:
+                self.data_buffer.clear()
+
         rigid_body = MoCapData.RigidBody(new_id, pos, rot)
 
         # Send information to any listener.
@@ -632,47 +733,6 @@ class NatNetClient:
                 rigid_body.tracking_valid = True
 
         return offset, rigid_body
-
-    # Unpack an asset rigid body object from a data packet
-    def __unpack_asset_rigid_body_data( self, data, major, minor):
-        offset = 0
-
-        # ID (4 bytes)
-        if len(data) < offset + 4:
-            return offset, None
-        new_id = int.from_bytes( data[offset:offset+4], byteorder='little', signed=True )
-        offset += 4
-
-        # Position (12 bytes)
-        if len(data) < offset + 12:
-            return offset, None
-        pos = Vector3.unpack( data[offset:offset+12] )
-        offset += 12
-
-        # Rotation (16 bytes)
-        if len(data) < offset + 16:
-            return offset, None
-        rot = Quaternion.unpack( data[offset:offset+16] )
-        offset += 16
-
-        # Mean Error (4 bytes)
-        if len(data) < offset + 4:
-            return offset, None
-        mean_error, = FloatValue.unpack( data[offset:offset+4] )
-        offset += 4
-
-        # Param (2 bytes)
-        if len(data) < offset + 2:
-            return offset, None
-        param, = struct.unpack( 'h', data[offset:offset+2] )
-        offset += 2
-
-        asset_rigid_body = MoCapData.AssetRigidBodyData(new_id, pos, rot, mean_error, param)
-
-        trace_mf( "Asset RB: ID: %3.1d, Pos: [%3.2f, %3.2f, %3.2f], Ori: [%3.2f, %3.2f, %3.2f, %3.2f], MeanError: %3.2f, Param: %3.1d"% (
-            new_id, pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3], mean_error, param))
-
-        return offset, asset_rigid_body
 
     # 簡略化されたその他のunpackメソッド
     def __unpack_skeleton( self, data, major, minor, skeleton_num=0):
@@ -763,29 +823,6 @@ class NatNetClient:
             if rigid_body is not None:
                 rigid_body_data.add_rigid_body(rigid_body)
         return offset, rigid_body_data
-
-    def __unpack_asset_data( self, data, packet_size, major, minor):
-        asset_data = MoCapData.AssetData()
-        offset = 0
-        asset_count = 0
-        if( ( major == 2 and minor > 0 ) or major > 2 ):
-            asset_count = int.from_bytes( data[offset:offset+4], byteorder='little', signed=True )
-            offset += 4
-            if asset_count > 0:
-                for i in range( 0, asset_count ):
-                    asset = MoCapData.Asset()
-                    asset_id = int.from_bytes( data[offset:offset+4], byteorder='little', signed=True )
-                    offset += 4
-                    asset.set_id(asset_id)
-                    rigid_body_count = int.from_bytes( data[offset:offset+4], byteorder='little', signed=True )
-                    offset += 4
-                    for j in range( 0, rigid_body_count ):
-                        rel_offset, asset_rigid_body = self.__unpack_asset_rigid_body_data( data[offset:], major, minor )
-                        offset += rel_offset
-                        if asset_rigid_body is not None:
-                            asset.add_rigid_body(asset_rigid_body)
-                    asset_data.add_asset(asset)
-        return offset, asset_data
 
     def __unpack_skeleton_data( self, data, packet_size, major, minor):
         skeleton_data = MoCapData.SkeletonData()
@@ -979,17 +1016,14 @@ class NatNetClient:
         mocap_data.set_rigid_body_data(rigid_body_data)
         rigid_body_count = rigid_body_data.get_rigid_body_count()
 
-        # Asset Data
-        rel_offset, asset_data = self.__unpack_asset_data(data[offset:], (packet_size - offset),major, minor)
-        offset += rel_offset
-        mocap_data.set_asset_data(asset_data)
-        asset_count = asset_data.get_asset_count()
-
         # Skeleton Data
         rel_offset, skeleton_data = self.__unpack_skeleton_data(data[offset:], (packet_size - offset),major, minor)
         offset += rel_offset
         mocap_data.set_skeleton_data(skeleton_data)
         skeleton_count = skeleton_data.get_skeleton_count()
+
+        # Assets処理（簡略化）
+        asset_count=0
 
         # Labeled Marker Data
         rel_offset, labeled_marker_data = self.__unpack_labeled_marker_data(data[offset:], (packet_size - offset),major, minor)
@@ -1016,80 +1050,8 @@ class NatNetClient:
         timestamp = frame_suffix_data.timestamp
         is_recording = frame_suffix_data.is_recording
         tracked_models_changed = frame_suffix_data.tracked_models_changed
-        # 現在のフレームタイムスタンプを保存
+        # 公式タイムスタンプを剛体記録用に一時保存
         self.current_frame_timestamp = timestamp
-
-        # --- 修正1: タイムスタンプ確定後に剛体データ処理 ---
-        # フレームカウンタ更新
-        self.frame_count += 1
-
-        # 修正4: 基準時刻同期（初回フレームで1回だけ設定）
-        if self.base_motive_ts is None:
-            self.base_motive_ts = timestamp
-            self.base_unix = time.time()
-            print(f"[TimeSync] Base motive_ts={timestamp:.6f}, base_unix={self.base_unix:.6f}")
-
-        # Unix時刻を計算（Motive高精度タイマーでフレーム間隔を保証、Windowsジッタは定数オフセットのみ）
-        unix_time_sec = self.base_unix + (timestamp - self.base_motive_ts)
-
-        # 剛体データの処理（GPS変換、UDP送信、CSV記録）
-        for rb in rigid_body_data.rigid_body_list:
-            new_id = rb.id_num
-            pos = rb.pos
-            rot = rb.rot  # Motive座標系 (qx, qy, qz, qw)
-
-            # 修正5: CSV記録（両方のタイムスタンプ）
-            if self.is_recording:
-                self.recording_data.append([
-                    timestamp,          # motive_timestamp
-                    unix_time_sec,      # unix_time_sec
-                    new_id,
-                    pos[0], pos[1], pos[2],
-                    rot[0], rot[1], rot[2], rot[3]
-                ])
-
-            # UDPターゲットが設定されている剛体のみ処理
-            if new_id not in self.udp_targets:
-                continue
-
-            # Motive座標系 → NED座標系への変換
-            rel_x, rel_y, rel_z = pos
-            motive_qx, motive_qy, motive_qz, motive_qw = rot
-
-            ned_x, ned_y, ned_z, ned_qw, ned_qx, ned_qy, ned_qz = self.motive_to_ned(
-                rel_x, rel_y, rel_z,
-                motive_qx, motive_qy, motive_qz, motive_qw
-            )
-
-            # NED → GPS（緯度・経度・高度）の変換
-            gps_lat, gps_lon, gps_alt = self.ned_to_gps(ned_x, ned_y, ned_z)
-
-            # Yaw角の計算
-            yaw_deg = self.quaternion_to_yaw_degrees([ned_qw, ned_qx, ned_qy, ned_qz])
-
-            if gps_lat is not None:
-                # 修正3: GPS値を整数表現に変換（structバイナリ用）
-                gps_lat_degE7 = int(round(gps_lat * 1e7))
-                gps_lon_degE7 = int(round(gps_lon * 1e7))
-                gps_alt_mm = int(round(gps_alt * 1000.0))
-                yaw_cdeg = int(round(yaw_deg * 100.0))
-
-                # UDP送信（修正3: structバイナリ31バイト fixed）
-                target_ip = self.udp_targets[new_id]
-                self.send_udp_data(
-                    new_id,
-                    gps_lat_degE7, gps_lon_degE7, gps_alt_mm,
-                    yaw_cdeg,
-                    timestamp, unix_time_sec,
-                    target_ip
-                )
-
-                # 50フレームに1回コンソール表示
-                if self.frame_count % 50 == 0:
-                    print(f"[Frame {self.frame_count}] RB{new_id}: GPS({gps_lat:.7f},{gps_lon:.7f},{gps_alt:.3f}) "
-                          f"Yaw={yaw_deg:.1f}° → {target_ip}:{self.udp_port}")
-            else:
-                print(f"ERROR: GPS conversion failed for RB{new_id}")
 
         # Send information to any listener.
         if self.new_frame_listener is not None:
@@ -1439,14 +1401,6 @@ class NatNetClient:
         print("Shutdown called")
         print(f"UDP Statistics - Sent: {self.udp_send_count}, Errors: {self.udp_error_count}")
         self.stop_threads = True
-
-        # 修正2: 永続UDPソケットをクローズ
-        for ip, sock in self.udp_sockets.items():
-            try:
-                sock.close()
-            except:
-                pass
-        self.udp_sockets.clear()
 
         try:
             self.command_socket.close()
