@@ -7,7 +7,6 @@ import DataDescriptions
 import MoCapData
 import socket
 import threading
-import pickle
 import msvcrt  # Windows用の非ブロッキング入力
 
 #   グローバル変数
@@ -124,7 +123,7 @@ def keyboard_monitor():
     print("  q: プログラム終了")
     print("  h: ヘルプ表示\n")
     
-    recording_state = None  # None: 記録未開始, 'recording': 記録中, 'zero_inserted': 0行挿入済み
+    recording_state = None  # None: 待機中, 'recording': 記録中
     while is_looping:
         try:
             # キーが押されているかチェック（非ブロッキング）
@@ -133,39 +132,20 @@ def keyboard_monitor():
                 # Enterキー（\r または \n）
                 if key in [b'\r', b'\n']:
                     try:
-                        # トグルロジック: 記録なし → 記録開始 → 0行挿入 → 記録停止 → 記録なし
+                        # トグルロジック: 待機中 → 記録開始, 記録中 → 記録停止
                         if recording_state is None:
-                            # 記録開始
-                            if not streaming_client.is_recording:
-                                print("\n[Enter押下] 記録開始...")
-                                streaming_client.start_recording()
-                                recording_state = 'recording'
-                                print(f"[DEBUG] 記録状態: is_recording={streaming_client.is_recording}")
-                            else:
-                                print("\n[ERROR] 既に記録中です（予期しない状態）")
+                            # 待機中 → 記録開始
+                            print("\n[Enter押下] 記録開始...")
+                            streaming_client.start_recording()
+                            recording_state = 'recording'
+                            print(f"[DEBUG] 記録状態: is_recording={streaming_client.is_recording}")
                         
                         elif recording_state == 'recording':
-                            # 全0行を挿入
-                            print("\n[Enter押下] 全0行を挿入...")
-                            if streaming_client.recording_data:
-                                zero_row = [0 if isinstance(x, (int, float)) else '0' for x in streaming_client.recording_data[0]]
-                            else:
-                                zero_row = [0] * 9  # timestamp, id, pos_x, pos_y, pos_z, qx, qy, qz, qw
-                            streaming_client.recording_data.append(zero_row)
-                            recording_state = 'zero_inserted'
-                            print(f"[DEBUG] 全0行を追加しました")
-                            print(f"[DEBUG] 現在のデータ行数: {len(streaming_client.recording_data)}")
-                        
-                        elif recording_state == 'zero_inserted':
-                            # 記録停止
-                            if streaming_client.is_recording:
-                                print("\n[Enter押下] 記録終了...")
-                                streaming_client.stop_recording()
-                                recording_state = None
-                                print(f"[DEBUG] 記録状態: is_recording={streaming_client.is_recording}")
-                            else:
-                                print("\n[ERROR] 記録が停止しています（予期しない状態）")
-                                recording_state = None
+                            # 記録中 → 記録停止
+                            print("\n[Enter押下] 記録終了...")
+                            streaming_client.stop_recording()
+                            recording_state = None
+                            print(f"[DEBUG] 記録状態: is_recording={streaming_client.is_recording}")
                     
                     except Exception as e:
                         print(f"[ERROR] エンター処理エラー: {e}")
@@ -181,7 +161,7 @@ def keyboard_monitor():
                 # hキー
                 elif key in [b'h', b'H']:
                     print("\n--- ヘルプ ---")
-                    print("  Enter: トグル (記録開始 → 全0行挿入 → 記録停止)")
+                    print("  Enter: 記録開始/停止（トグル）")
                     print("  q: プログラム終了")
                     print("  h: このヘルプを表示")
                     print("--------------\n")
