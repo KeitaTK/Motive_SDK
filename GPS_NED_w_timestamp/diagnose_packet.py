@@ -285,6 +285,14 @@ def main():
         mocap_data.set_rigid_body_data(rigid_body_data)
         print(f"  Offset after  rigid_body_data        : {offset}")
 
+        # -- Asset Data --
+        print(f"  Offset before asset_data             : {offset}")
+        rel, asset_data = client._NatNetClient__unpack_asset_data(
+            data[offset:], packet_size - offset, major, minor)
+        offset += rel
+        mocap_data.set_asset_data(asset_data)
+        print(f"  Offset after  asset_data             : {offset}")
+
         # -- Skeleton Data --
         rel, skeleton_data = client._NatNetClient__unpack_skeleton_data(
             data[offset:], packet_size - offset, major, minor)

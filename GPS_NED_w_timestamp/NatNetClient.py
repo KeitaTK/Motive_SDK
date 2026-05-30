@@ -633,6 +633,47 @@ class NatNetClient:
 
         return offset, rigid_body
 
+    # Unpack an asset rigid body object from a data packet
+    def __unpack_asset_rigid_body_data( self, data, major, minor):
+        offset = 0
+
+        # ID (4 bytes)
+        if len(data) < offset + 4:
+            return offset, None
+        new_id = int.from_bytes( data[offset:offset+4], byteorder='little', signed=True )
+        offset += 4
+
+        # Position (12 bytes)
+        if len(data) < offset + 12:
+            return offset, None
+        pos = Vector3.unpack( data[offset:offset+12] )
+        offset += 12
+
+        # Rotation (16 bytes)
+        if len(data) < offset + 16:
+            return offset, None
+        rot = Quaternion.unpack( data[offset:offset+16] )
+        offset += 16
+
+        # Mean Error (4 bytes)
+        if len(data) < offset + 4:
+            return offset, None
+        mean_error, = FloatValue.unpack( data[offset:offset+4] )
+        offset += 4
+
+        # Param (2 bytes)
+        if len(data) < offset + 2:
+            return offset, None
+        param, = struct.unpack( 'h', data[offset:offset+2] )
+        offset += 2
+
+        asset_rigid_body = MoCapData.AssetRigidBodyData(new_id, pos, rot, mean_error, param)
+
+        trace_mf( "Asset RB: ID: %3.1d, Pos: [%3.2f, %3.2f, %3.2f], Ori: [%3.2f, %3.2f, %3.2f, %3.2f], MeanError: %3.2f, Param: %3.1d"% (
+            new_id, pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3], mean_error, param))
+
+        return offset, asset_rigid_body
+
     # 簡略化されたその他のunpackメソッド
     def __unpack_skeleton( self, data, major, minor, skeleton_num=0):
         offset = 0
@@ -722,6 +763,29 @@ class NatNetClient:
             if rigid_body is not None:
                 rigid_body_data.add_rigid_body(rigid_body)
         return offset, rigid_body_data
+
+    def __unpack_asset_data( self, data, packet_size, major, minor):
+        asset_data = MoCapData.AssetData()
+        offset = 0
+        asset_count = 0
+        if( ( major == 2 and minor > 0 ) or major > 2 ):
+            asset_count = int.from_bytes( data[offset:offset+4], byteorder='little', signed=True )
+            offset += 4
+            if asset_count > 0:
+                for i in range( 0, asset_count ):
+                    asset = MoCapData.Asset()
+                    asset_id = int.from_bytes( data[offset:offset+4], byteorder='little', signed=True )
+                    offset += 4
+                    asset.set_id(asset_id)
+                    rigid_body_count = int.from_bytes( data[offset:offset+4], byteorder='little', signed=True )
+                    offset += 4
+                    for j in range( 0, rigid_body_count ):
+                        rel_offset, asset_rigid_body = self.__unpack_asset_rigid_body_data( data[offset:], major, minor )
+                        offset += rel_offset
+                        if asset_rigid_body is not None:
+                            asset.add_rigid_body(asset_rigid_body)
+                    asset_data.add_asset(asset)
+        return offset, asset_data
 
     def __unpack_skeleton_data( self, data, packet_size, major, minor):
         skeleton_data = MoCapData.SkeletonData()
@@ -915,14 +979,17 @@ class NatNetClient:
         mocap_data.set_rigid_body_data(rigid_body_data)
         rigid_body_count = rigid_body_data.get_rigid_body_count()
 
+        # Asset Data
+        rel_offset, asset_data = self.__unpack_asset_data(data[offset:], (packet_size - offset),major, minor)
+        offset += rel_offset
+        mocap_data.set_asset_data(asset_data)
+        asset_count = asset_data.get_asset_count()
+
         # Skeleton Data
         rel_offset, skeleton_data = self.__unpack_skeleton_data(data[offset:], (packet_size - offset),major, minor)
         offset += rel_offset
         mocap_data.set_skeleton_data(skeleton_data)
         skeleton_count = skeleton_data.get_skeleton_count()
-
-        # Assets処理（簡略化）
-        asset_count=0
 
         # Labeled Marker Data
         rel_offset, labeled_marker_data = self.__unpack_labeled_marker_data(data[offset:], (packet_size - offset),major, minor)
