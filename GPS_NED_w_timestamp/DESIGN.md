@@ -338,7 +338,7 @@ SDKは Motive から受信した剛体の生データ（位置・姿勢）をCSV
 
 | カラム | 型 | 説明 | 記録元 |
 |--------|-----|------|--------|
-| `timestamp` | float | Motive公式タイムスタンプ（`frame_suffix_data.timestamp`） | `NatNetClient.current_frame_timestamp` |
+| `timestamp` | int | SDK生成タイムスタンプ（`time.time_ns()`、ナノ秒単位のUnix時刻） | `time.time_ns()` |
 | `rigid_body_id` | int | 剛体ID | `new_id` |
 | `pos_x` | float | Motive座標系 X（北） | `pos[0]` |
 | `pos_y` | float | Motive座標系 Y（上） | `pos[1]` |
@@ -349,6 +349,7 @@ SDKは Motive から受信した剛体の生データ（位置・姿勢）をCSV
 | `quat_w` | float | クォータニオン W成分 | `rot[3]` |
 
 > **注意**: CSVには Motive から受信した**生データ**（変換前）が記録される。座標変換（`motive_to_ned()` + `ned_to_gps()`）は UDP 送信用（`GPS_INPUT`）であり、CSV 記録には適用されない。
+> **注意**: `timestamp` 列は **SDK側で `time.time_ns()` により生成** される。Motive からはフレームのタイムスタンプが送られてこないため（§3.3参照）、システムクロックに基づくナノ秒精度の時刻を記録する。
 
 #### サンプルデータ
 
@@ -387,11 +388,12 @@ None ────────▶ recording ────────▶ zero_inse
 #### データ追加
 
 `NatNetClient.__unpack_rigid_body()` 内（L561-569）で、`is_recording` が `True` の場合に毎フレーム（50Hz）データを追加する:
+- タイムスタンプには `time.time_ns()` でSDK側のシステム時刻をナノ秒単位で記録する（Motiveのタイムスタンプは使用しない）
 
 ```python
 if self.is_recording:
     self.recording_data.append([
-        official_timestamp,
+        time.time_ns(),
         new_id,
         pos[0], pos[1], pos[2],
         rot[0], rot[1], rot[2], rot[3]
@@ -424,4 +426,5 @@ CSV 記録は `GPS_INPUT` / `SYSTEM_TIME` の UDP 送信とは独立して動作
 
 | 日付 | 変更内容 |
 |------|---------|
+| 2026-05-31 | CSV記録の timestamp を Motive公式タイムスタンプから SDK生成(`time.time_ns()`) に修正（Motiveがタイムスタンプを送信しない実装に合わせた設計変更） |
 | 2026-05-31 | 初版作成。Motiveからのタイムスタンプ未送信に対応。`time.time_ns()` による `SYSTEM_TIME` 送信方式に変更。SDK側はGPS/SYSTEM_TIMEともに50Hzで間引きなし送信。Raspi側でSYSTEM_TIMEをGPS 5回に1回（3Hz）に間引いてArduPilot転送。`GPS_INPUT` から時刻フィールドを削除。ソケット永続化の設計を追加。SDK側ルーティング方式を正式採用。CSV記録機能セクションを追加。 |
