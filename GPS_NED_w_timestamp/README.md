@@ -1,186 +1,196 @@
-# GPS_NED_w フォルダ
+# GPS_NED_w_timestamp
 
 ## 概要
-OptiTrack MotiveからNatNetプロトコルでリアルタイムに剛体データを取得し、NED座標系およびGPS座標系に変換してUDP送信するPythonプログラムです。  
-マルチターゲット対応で、剛体IDごとに異なるIPアドレスに送信できます。
+OptiTrack Motive から NatNet で剛体データを受け取り、Motive 座標を NED と GPS に変換して、剛体 ID ごとに UDP 送信する Python アプリです。送信データは pickle ではなく、`struct` による固定長バイナリです。記録機能を有効にすると、実行中のフレームを CSV に保存できます。
 
-## 主な機能
+このフォルダの主な実行入口は [PythonSample.py](PythonSample.py) です。設定は [config.json](config.json) から読み込みます。
 
-### 1. 座標変換
-- **Motive座標系 → NED座標系**  
-  Motiveの右手座標系(X=右, Y=上, Z=奥)をNED座標系(North, East, Down)に変換
-- **NED座標系 → GPS座標系**  
-  NED座標を基準GPS座標からの相対位置として緯度・経度・高度に変換
+## 何をするアプリか
+1. Motive から 50Hz 前後の剛体フレームを受信します。
+2. 剛体位置を Motive 座標系から NED に変換します。
+3. NED を基準 GPS 座標からの相対位置として緯度・経度・高度に変換します。
+4. 姿勢から Yaw を算出します。
+5. 剛体 ID ごとに、設定された送信先へ UDP 送信します。
+6. 必要に応じて、フレームデータを CSV に記録します。
 
-### 2. 姿勢計算
-- クォータニオンからYaw角（度単位、0-360度）を計算
-
-### 3. UDP送信
-- 剛体IDごとに異なるIPアドレスに送信
-- 送信先は `config.json` で設定
-- 送信頻度: 50Hz（Motiveのストリーミング周波数と同期）
-
-### 4. データ記録機能 ✨NEW
-- プログラム実行中にエンターキーで記録制御（非ブロッキング）
-   1回目: 記録開始
-   2回目: 全0行を挿入
-   3回目: 記録停止（以降リセット）
-- 記録内容:
-   - 公式タイムスタンプ（Motiveフレーム時刻）
-   - 剛体ID
-   - Motiveローカル座標系の位置 (x, y, z)
-   - 姿勢のクォータニオン (qx, qy, qz, qw)
-- 記録停止時に自動的にCSVファイルに保存
-- ファイル名: `record_YYYYMMDD_HHMMSS.csv` (記録開始時刻)
-- 記録機能の有効/無効は `config.json` で設定
+## 実行イメージ
+```mermaid
+flowchart LR
+    Motive[OptiTrack Motive] -->|NatNet| Client[NatNetClient.py]
+    Client --> Convert[座標変換\nMotive -> NED -> GPS]
+    Client --> Packet[31バイト固定長 UDP\nstruct.pack('<BiiiHdd')]
+    Client --> Recording[CSV記録\nrecord_YYYYMMDD_HHMMSS.csv]
+    Packet --> Targets[剛体IDごとの送信先IP]
+```
 
 ## ファイル構成
-
+```text
+GPS_NED_w_timestamp/
+├── config.json
+├── NatNetClient.py
+├── PythonSample.py
+├── DataDescriptions.py
+├── MoCapData.py
+├── PythonClient.pyproj
+├── PythonClient.sln
+├── DESIGN.md
+└── README.md
 ```
-GPS_NED_w/
-├── config.json              # 設定ファイル（UDP送信先、記録機能の有効/無効）
-├── NatNetClient.py          # NatNetクライアント本体
-├── PythonSample.py          # サンプル実行スクリプト
-├── DataDescriptions.py      # データ記述クラス
-├── MoCapData.py             # モーションキャプチャデータクラス
-├── PythonClient.pyproj      # Visual Studioプロジェクトファイル
-├── PythonClient.sln         # Visual Studioソリューションファイル
-└── README.md                # このファイル
-```
-
-## 設定ファイル (config.json)
-
-```json
-{
-    "udp_targets": {
-        "1": "192.168.11.16",
-        "2": "192.168.11.61"
-    },
-    "recording_enabled": true
-}
-```
-
-### 設定項目
-
-#### udp_targets
-剛体IDと送信先IPアドレスのマッピング。  
-送信したい剛体の数だけエントリを追加してください。
-
-例:
-- 1つだけ送信: `{"1": "192.168.11.16"}`
-- 2つ送信: `{"1": "192.168.11.16", "2": "192.168.11.61"}`
-- 3つ送信: `{"1": "192.168.11.16", "2": "192.168.11.61", "3": "192.168.11.70"}`
-
-#### recording_enabled
-データ記録機能の有効/無効を設定。
-- `true`: 記録機能有効（エンターキーで記録開始/停止）
-- `false`: 記録機能無効
 
 ## 使い方
-
-### 1. 環境準備
+### 1. 依存ライブラリを入れる
 ```bash
 pip install pyned2lla
 ```
 
-### 2. 設定ファイル編集
-`config.json` を編集して、送信先IPアドレスと記録機能の有効/無効を設定します。
+### 2. 設定を編集する
+[config.json](config.json) で、送信したい剛体 ID と送信先 IP を設定します。
 
-### 3. プログラム実行
+```json
+{
+  "udp_targets": {
+    "1": "192.168.11.16",
+    "2": "192.168.11.61"
+  },
+  "recording_enabled": true
+}
+```
+
+### 3. 起動する
 ```bash
 python PythonSample.py
 ```
 
-### 4. データ記録（recording_enabled=trueの場合）
-- プログラム起動後、エンターキーを押すたびに以下の動作を繰り返します：
-   - 1回目: 記録開始
-   - 2回目: 全0行を挿入
-   - 3回目: 記録停止してCSVファイルを保存（以降リセット）
-- CSVファイル名: `record_YYYYMMDD_HHMMSS.csv`
+### 4. 操作する
+`recording_enabled` が `true` のとき、PythonSample.py のキーボード監視で次の操作が使えます。
 
-### 5. 停止
-`Ctrl+C` で停止
+- `Enter`: 記録開始 -> 全0行を1行追加 -> 記録停止して CSV 保存
+- `q`: 終了
+- `h`: ヘルプ表示
 
-## CSV出力フォーマット
+### 5. 停止する
+`Ctrl+C` で停止します。
 
-| カラム名 | 説明 |
-|---------|------|
-| timestamp | Motive公式タイムスタンプ（秒） |
-| rigid_body_id | 剛体ID |
-| pos_x | Motiveローカル座標X |
-| pos_y | Motiveローカル座標Y |
-| pos_z | Motiveローカル座標Z |
-| quat_x | クォータニオンX |
-| quat_y | クォータニオンY |
-| quat_z | クォータニオンZ |
-| quat_w | クォータニオンW |
+## 設定項目
+### `udp_targets`
+剛体 ID と送信先 IP アドレスの対応表です。たとえば次のように設定します。
 
-## 送信データ形式
-
-UDP送信されるデータはPythonのpickle形式でシリアライズされた辞書です:
-
-```python
+```json
 {
-    'id': 1,                           # 剛体ID
-    'gps_lat': 36.0757812,             # GPS緯度（7桁精度）
-    'gps_lon': 136.2132945,            # GPS経度（7桁精度）
-    'gps_alt': 1.234,                  # GPS高度（3桁精度）
-    'ned_position': [1.23, 4.56, -0.78],  # NED座標 [N, E, D]
-    'ned_rotation': [0.0, 0.0, 0.707, 0.707],  # NEDクォータニオン [qw, qx, qy, qz]
-    'yaw_deg': 123.456,                # Yaw角（度、0-360）
-    'motive_position': [1.0, 2.0, 3.0],  # Motive座標
-    'motive_rotation': [0.0, 0.0, 0.707, 0.707],  # Motiveクォータニオン
-    'data_no': 1234,                   # データ番号
-    'timestamp': 0.123,                # タイムスタンプ
-    'frame_time': 12345.678            # フレーム時刻
+  "udp_targets": {
+    "1": "192.168.11.16",
+    "2": "192.168.11.61",
+    "3": "192.168.11.70"
+  }
 }
 ```
 
-## GPS基準座標設定
+### `recording_enabled`
+記録機能の有効/無効です。
 
-NatNetClient.py の以下の行で基準GPS座標を設定できます:
+- `true`: 記録を有効化
+- `false`: 記録を無効化
 
-```python
-self.ref_lat = 36.0757800  # 緯度（7桁精度）
-self.ref_lon = 136.2132900  # 経度（7桁精度）
-self.ref_alt = 0.000        # 高度（3桁精度）
+設定ファイルの読み込みに失敗した場合は、送信先なし・記録無効として起動します。
+
+## 技術資料
+
+### 1. システム全体の役割分担
+このフォルダは Motive PC 側の送信処理を担当します。下流の受信側では、この UDP バイナリを受けて GPS/MAVLink などに変換できます。
+
+```mermaid
+flowchart LR
+    MotivePC[Motive PC] -->|NatNet 50Hz| Sender[NatNetClient.py]
+    Sender -->|UDP 31 bytes| Receiver[受信側アプリ]
+    Receiver -->|必要に応じて変換| Downstream[下流システム]
 ```
 
-## 注意事項
+### 2. 時刻同期の考え方
+Motive のフレームサフィックスから得られる `timestamp` を毎フレーム使い、起動時に一度だけ取得した Unix 時刻を基準に補間します。
 
-1. **ネットワーク設定**  
-   Motiveの「Streaming Settings」で、このPCのIPアドレスをローカルインターフェイスとして設定してください。
+```text
+base_motive_ts = 初回フレームの Motive timestamp
+base_unix      = 初回フレーム受信時の time.time()
 
-2. **UDP送信先**  
-   送信先のIPアドレスは、同一ネットワーク内で到達可能なアドレスを指定してください。
+unix_time_sec = base_unix + (timestamp - base_motive_ts)
+```
 
-3. **記録データ容量**  
-   50Hzで記録するため、長時間記録すると大きなファイルになります。  
-   例: 1剛体で10分間記録 → 約30,000行
+この方式により、`time.time()` のジッタは起動時の定数オフセットに限定され、フレーム間の相対時間は Motive の timestamp を基準に保てます。
 
-4. **互換性**  
-   udp_targets.jsonは廃止予定です。今後はconfig.jsonをご使用ください。
+### 3. 座標変換
+- Motive 座標の位置は NED に変換してから GPS に変換します。
+- 位置変換は次の対応です。
+  - `x -> North`
+  - `z -> East`
+  - `y -> Down` は符号反転
+- 姿勢クォータニオンも同じ軸対応で変換します。
+- 変換後の GPS は `pyned2lla` を使って基準緯度・経度・高度から求めます。
+- 緯度・経度は 7 桁精度、高度は 3 桁精度に丸めます。
+- Yaw は変換後クォータニオンから 0 から 360 度の範囲で算出します。
 
-## トラブルシューティング
+### 4. UDP ペイロード
+送信パケットは固定長 31 バイトです。
 
-### データが受信できない
-- Motiveでストリーミングが有効になっているか確認
-- ファイアウォールでポート1510, 1511が開いているか確認
-- ローカルIPアドレスが正しく設定されているか確認
+```python
+struct.pack('<BiiiHdd',
+            rigid_body_id,
+            gps_lat_degE7,
+            gps_lon_degE7,
+            gps_alt_mm,
+            yaw_cdeg,
+            motive_timestamp,
+            unix_time_sec)
+```
 
-### UDP送信エラー
-- 送信先IPアドレスが正しいか確認
-- ネットワークが接続されているか確認
-- 送信先ポート（デフォルト15769）が開いているか確認
+| フィールド | 型 | 説明 |
+|---|---|---|
+| rigid_body_id | uint8 | 剛体 ID |
+| gps_lat_degE7 | int32 | 緯度を $10^7$ 倍した整数 |
+| gps_lon_degE7 | int32 | 経度を $10^7$ 倍した整数 |
+| gps_alt_mm | int32 | 高度を mm に変換した整数 |
+| yaw_cdeg | uint16 | Yaw を $10^2$ 倍した整数 |
+| motive_timestamp | float64 | Motive のフレームタイムスタンプ |
+| unix_time_sec | float64 | 基準 Unix 時刻から補間した秒数 |
 
-### 記録が開始できない
-- config.jsonで `recording_enabled: true` になっているか確認
-- ターミナルでエンターキーが正しく入力できているか確認
-- エンター1回目:記録開始、2回目:全0行挿入、3回目:記録停止（以降リセット）
+受信側は `struct.unpack('<BiiiHdd', data[:31])` で復元できます。
 
-## 開発情報
+### 5. CSV 記録
+記録停止時に `~/Downloads/record_YYYYMMDD_HHMMSS.csv` へ保存します。CSV の列は次の順です。
 
+| カラム名 | 説明 |
+|---|---|
+| motive_timestamp | Motive のフレームタイムスタンプ |
+| unix_time_sec | 補間した Unix 時刻 |
+| rigid_body_id | 剛体 ID |
+| pos_x | Motive 位置 X |
+| pos_y | Motive 位置 Y |
+| pos_z | Motive 位置 Z |
+| qx | クォータニオン X |
+| qy | クォータニオン Y |
+| qz | クォータニオン Z |
+| qw | クォータニオン W |
+
+### 6. 基準 GPS 座標
+基準値は [NatNetClient.py](NatNetClient.py) 内で次のように設定されています。
+
+```python
+self.ref_lat = 36.0757800
+self.ref_lon = 136.2132900
+self.ref_alt = 0.000
+```
+
+### 7. 注意事項
+- Motive 側でストリーミングが有効になっている必要があります。
+- UDP 送信先は到達可能な同一ネットワーク上の IP を指定してください。
+- UDP 送信ポートは 15769 です。
+- 長時間記録すると CSV は大きくなります。
+
+### 8. トラブルシューティング
+- データが来ない場合は、Motive のストリーミング設定とファイアウォールを確認してください。
+- UDP 送信エラーが出る場合は、送信先 IP とネットワーク到達性を確認してください。
+- 記録できない場合は、`config.json` の `recording_enabled` とキーボード入力を確認してください。
+
+## 補足
 - Python 3.x
-- 依存ライブラリ: pyned2lla
-- サンプリング周波数: 50Hz
-- UDP送信ポート: 15769
+- 依存ライブラリ: `pyned2lla`
+- UDP 送信ポート: 15769
