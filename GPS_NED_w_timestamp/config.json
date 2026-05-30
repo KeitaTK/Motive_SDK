@@ -3,5 +3,7 @@
         "1": "192.168.11.16",
         "2": "192.168.11.61"
     },
+    "udp_port": 15769,
+    "system_time_divider": 5,
     "recording_enabled": true
 }

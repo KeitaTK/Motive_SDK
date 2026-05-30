@@ -123,11 +123,12 @@ class NatNetClient:
             self.udp_targets = {int(k): v for k, v in udp_targets_dict.items()}
             # 記録機能の有効/無効
             self.recording_enabled = config.get("recording_enabled", False)
+            self.udp_port = config.get("udp_port", 15769)
         except Exception as e:
             print(f"[警告] config.jsonの読み込みに失敗: {e}")
             self.udp_targets = {}
             self.recording_enabled = False
-        self.udp_port = config.get("udp_port", 15769)
+            self.udp_port = 15769
         
         # UDP統計情報
         self.udp_send_count = 0
