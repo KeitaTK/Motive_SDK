@@ -196,31 +196,62 @@ def __unpack_rigid_body(self, ...):
 
 ### 5.2 Raspi側
 
-Raspi側で受信したデータを以下の周期で ArduPilot に転送する。
+Raspi側ではUDPでstructバイナリを受信し、最新データを15Hz周期でArduPilotにMAVLink送信する。SYSTEM_TIMEは間引かず毎回送信。
 
 | データ | SDK→Raspi周期 | Raspi→ArduPilot周期 | 実装方針 |
 |--------|--------------|---------------------|---------|
-| `GPS_INPUT` | 50Hz | **15Hz**（最新値定期送信） | 受信したstructをアンパックしGPS_INPUT MAVLink送信 |
-| `SYSTEM_TIME` | 50Hz（struct埋め込み） | **15Hz**（毎回間引きなし） | アンパックした`unix_time_sec`をSYSTEM_TIME MAVLink送信 |
+| `GPS_INPUT` | 50Hz(UDP受信) | **15Hz** | structアンパック後そのままMAVLink送信 |
+| `SYSTEM_TIME` | 50Hz(struct埋め込み) | **15Hz** | unix_time_secを抽出して毎回MAVLink SYSTEM_TIME送信（間引きなし） |
 
 ```python
-# Raspi側 受信ロジック
-import struct
+# Raspi側 15Hz定期送信
+import struct, time
+from pymavlink import mavutil
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind(("0.0.0.0", 15769))
+# MAVLink接続のセットアップ
+mav = mavutil.mavlink_connection('/dev/serial0', baud=921600)
+
+class PeriodicSender:
+    """15Hz (66.67ms間隔) の定期送信ループ"""
+    def __init__(self):
+        self.interval = 1.0 / 15.0  # 66.67ms
+        self.latest_data = None
+        self._running = True
+
+    def update_data(self, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec):
+        """UDP受信時に最新データを更新"""
+        self.latest_data = (lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec)
+
+    def run(self):
+        """15Hz定期送信ループ"""
+        next_time = time.perf_counter()
+        while self._running:
+            if self.latest_data is not None:
+                lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec = self.latest_data
+                # 毎回 SYSTEM_TIME 送信（間引きなし）
+                send_system_time(mav, unix_time_sec)
+                # 毎回 GPS_INPUT 送信
+                send_gps_input(mav, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec)
+            
+            next_time += self.interval
+            sleep_time = next_time - time.perf_counter()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+# UDP受信ループ（structバイナリ受信 → 最新データ更新のみ）
+sender = PeriodicSender()
+# sender.run() は別スレッドで起動
 
 while True:
-    data, addr = sock.recvfrom(1024)
-    rigid_body_id, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec = \
-        struct.unpack('<BiiiHd', data)
-    
-    # GPS_INPUT 送信（15Hz 最新値定期送信）
-    send_mavlink_gps_input(lat_e7, lon_e7, alt_mm, yaw_cdeg)
-    
-    # SYSTEM_TIME 送信（毎回、間引きなし = 15Hz）
-    send_mavlink_system_time(unix_time_sec)
+    data, addr = sock.recvfrom(4096)
+    # struct.unpack: <B=uint8 format_version, i=int32 lat_e7, i=lon_e7, i=alt_mm,
+    #                H=uint16 yaw_cdeg, d=float64 unix_time_sec
+    fmt_version, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec = \
+        struct.unpack('<BiiiHd', data[:23])
+    sender.update_data(lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec)
 ```
+
+> 間引きカウンタ（`gps_frame_count % 5`）は廃止。SYSTEM_TIMEは毎回送信される。
 
 ---
 
@@ -229,10 +260,9 @@ while True:
 Raspi側の受信スクリプトは以下の流れで動作する：
 
 1. UDP ソケットで `struct` バイナリデータ（23バイト固定長）を受信
-2. `struct.unpack('<BiiiHd', data)` で各フィールドを展開
-   - `lat_e7, lon_e7, alt_mm, yaw_cdeg` → `GPS_INPUT` MAVLinkメッセージを生成・送信
-   - `unix_time_sec` → `SYSTEM_TIME` MAVLinkメッセージを生成・送信
-3. MAVLinkメッセージを Flight Controller にシリアル経由で送信
+2. `struct.unpack('<BiiiHd', data[:23])` で全フィールドを一度にアンパック（structは単一フォーマット）
+3. 受信後すぐに `GPS_INPUT` 送信 + `SYSTEM_TIME` 送信（間引きなし）
+4. MAVLinkメッセージを Flight Controller にシリアル経由で送信
 
 ```python
 # Raspi側 擬似コード
@@ -242,14 +272,13 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind(("0.0.0.0", 15769))
 
 while True:
-    data, addr = sock.recvfrom(1024)
-    rigid_body_id, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec = \
-        struct.unpack('<BiiiHd', data)
+    data, addr = sock.recvfrom(4096)
+    fmt_version, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec = \
+        struct.unpack('<BiiiHd', data[:23])
     
-    # GPS_INPUT 送信
-    send_mavlink_gps_input(lat_e7, lon_e7, alt_mm, yaw_cdeg)
-    
-    # SYSTEM_TIME 送信（間引きなし、毎回送信）
+    # GPS_INPUT 送信（間引きなし）
+    send_mavlink_gps_input(lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec)
+    # SYSTEM_TIME 送信（間引きなし）
     send_mavlink_system_time(unix_time_sec)
 ```
 
@@ -264,7 +293,9 @@ while True:
     "2": "192.168.1.20",
     "3": "192.168.1.30"
   },
-  "udp_port": 15769
+  "udp_port": 15769,
+  "system_time_divider": 5,
+  "recording_enabled": false
 }
 ```
 
@@ -272,6 +303,8 @@ while True:
 |------|------|
 | `udp_targets` | 剛体ID → 送信先IPアドレスのマッピング |
 | `udp_port` | UDP送信先ポート番号 |
+| `system_time_divider` | （予備。現在は未使用） |
+| `recording_enabled` | `true` でCSV記録機能が有効化（`NatNetClient.__init__` で読み込み）。デフォルト: `false` |
 
 ---
 
@@ -298,20 +331,7 @@ SDKは Motive から受信した剛体の生データ（位置・姿勢）をCSV
 
 ### 9.2 設定 (config.json)
 
-```json
-{
-  "udp_targets": {
-    "1": "192.168.1.10",
-    "2": "192.168.1.20"
-  },
-  "udp_port": 15769,
-  "recording_enabled": true
-}
-```
-
-| 項目 | 説明 |
-|------|------|
-| `recording_enabled` | `true` に設定すると記録機能が有効化される（`NatNetClient.__init__` で読み込み: L126-130）。デフォルトは `false` |
+設定項目の詳細は [§7 設定ファイル](#7-設定ファイル-configjson) を参照。`recording_enabled` は §7 の config.json に統合されている。
 
 ### 9.3 ファイル形式
 
