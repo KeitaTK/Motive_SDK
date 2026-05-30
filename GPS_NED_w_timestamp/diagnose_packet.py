@@ -32,6 +32,15 @@ def _hex(data, maxlen=64):
     return data[:maxlen].hex(" ")
 
 
+def _dump_hex_at(label, data, offset, maxlen=32):
+    """Print a labeled hex dump of *maxlen* bytes starting at *offset* in data."""
+    chunk = data[offset:offset + maxlen]
+    if len(chunk) == 0:
+        print(f"  [HEX @{offset:>4d}] {label}: (empty)")
+    else:
+        print(f"  [HEX @{offset:>4d}] {label} ({len(chunk)} bytes): {chunk.hex(' ')}")
+
+
 def _diag_unpack_suffix(data: bytes, packet_size: int,
                         major: int, minor: int):
     """Unpack frame suffix data with full diagnostic output.
@@ -284,6 +293,16 @@ def main():
         offset += rel
         mocap_data.set_rigid_body_data(rigid_body_data)
         print(f"  Offset after  rigid_body_data        : {offset}")
+
+        # -- Asset Rigid Body Data --
+        print(f"  Offset before asset_rigid_body_data  : {offset}")
+        _dump_hex_at("BEFORE asset_rb_data    ", data, offset)
+        rel, asset_rb_data = client._NatNetClient__unpack_frame_asset_rigid_body_data(
+            data[offset:], packet_size - offset, major, minor)
+        offset += rel
+        mocap_data.set_asset_rigid_body_data(asset_rb_data)
+        print(f"  Offset after  asset_rigid_body_data  : {offset}  (consumed {rel})")
+        _dump_hex_at("AFTER  asset_rb_data    ", data, offset)
 
         # -- Asset Data --
         print(f"  Offset before asset_data             : {offset}")
