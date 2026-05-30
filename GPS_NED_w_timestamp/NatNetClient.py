@@ -8,7 +8,6 @@ import DataDescriptions
 import MoCapData
 import math
 import pyned2lla
-import pickle
 import json
 import os
 
@@ -128,7 +127,7 @@ class NatNetClient:
             print(f"[警告] config.jsonの読み込みに失敗: {e}")
             self.udp_targets = {}
             self.recording_enabled = False
-        self.udp_port = 15769
+        self.udp_port = config.get("udp_port", 15769)
         
         # UDP統計情報
         self.udp_send_count = 0
@@ -139,6 +138,13 @@ class NatNetClient:
         for rb_id, ip in self.udp_targets.items():
             print(f"  Rigid Body {rb_id} → {ip}:{self.udp_port}")
         print("UDP sending at 50Hz (every frame), Console display every 50 frames")
+
+        # Persist UDP sockets (one per target IP)
+        self.udp_sockets = {}
+        for rb_id, target_ip in self.udp_targets.items():
+            if target_ip not in self.udp_sockets:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.udp_sockets[target_ip] = sock
 
         # Client/server message ids
         self.NAT_CONNECT = 0
@@ -218,50 +224,29 @@ class NatNetClient:
             print(f"Yaw calculation error: {e}")
             return 0.0
 
-    def send_udp_data(self, rigid_body_data, target_ip, rigid_body_id):
-        """UDP送信"""
+    def send_udp_data(self, packed_data: bytes, target_ip: str):
+        """UDP送信（永続ソケット使用）"""
         try:
-            # ソケット作成
-            client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            client.settimeout(2.0)  # 2秒タイムアウト
-            
-            # データシリアライズ
-            serialized_data = pickle.dumps(rigid_body_data)
-            data_size = len(serialized_data)
-            
-            # UDP送信実行
-            bytes_sent = client.sendto(serialized_data, (target_ip, self.udp_port))
-            client.close()
-            
-            # 送信成功
+            sock = self.udp_sockets[target_ip]
+            sock.sendto(packed_data, (target_ip, self.udp_port))
             self.udp_send_count += 1
             return True
-            
         except socket.timeout:
             self.udp_error_count += 1
-            print(f"✗ UDP timeout to {target_ip}:{self.udp_port} for RB{rigid_body_id}")
+            print(f"✗ UDP timeout to {target_ip}:{self.udp_port}")
             return False
-            
         except socket.gaierror as e:
             self.udp_error_count += 1
-            print(f"✗ UDP address error to {target_ip}:{self.udp_port} for RB{rigid_body_id}: {e}")
+            print(f"✗ UDP address error to {target_ip}:{self.udp_port}: {e}")
             return False
-            
         except ConnectionRefusedError:
             self.udp_error_count += 1
-            print(f"✗ UDP connection refused by {target_ip}:{self.udp_port} for RB{rigid_body_id}")
+            print(f"✗ UDP connection refused by {target_ip}:{self.udp_port}")
             return False
-            
         except Exception as e:
             self.udp_error_count += 1
-            print(f"✗ UDP send error to {target_ip}:{self.udp_port} for RB{rigid_body_id}: {e}")
+            print(f"✗ UDP send error to {target_ip}:{self.udp_port}: {e}")
             return False
-        
-        finally:
-            try:
-                client.close()
-            except:
-                pass
 
     def start_recording(self):
         """記録開始"""
@@ -562,7 +547,7 @@ class NatNetClient:
         if self.is_recording:
             # timestamp, rigid_body_id, pos_x, pos_y, pos_z, quat_x, quat_y, quat_z, quat_w
             self.recording_data.append([
-                official_timestamp,
+                time.time_ns(),
                 new_id,
                 pos[0], pos[1], pos[2],
                 rot[0], rot[1], rot[2], rot[3]
@@ -588,61 +573,29 @@ class NatNetClient:
             # Yaw角の計算
             yaw_deg = self.quaternion_to_yaw_degrees([ned_qw, ned_qx, ned_qy, ned_qz])
 
-            # GPS変換が成功した場合
+            # structバイナリ生成とUDP送信
             if gps_lat is not None:
-                # GPSデータの構築
-                gps_data = {
-                    'status': 'SUCCESS',
-                    'id': new_id,
-                    'latitude': gps_lat,
-                    'longitude': gps_lon,
-                    'altitude': gps_alt,
-                    'yaw_degrees': yaw_deg,
-                    'ned_position': [ned_x, ned_y, ned_z],
-                    'ned_rotation': [ned_qw, ned_qx, ned_qy, ned_qz],
-                    'motive_position': [rel_x, rel_y, rel_z],
-                    'motive_rotation': [motive_qx, motive_qy, motive_qz, motive_qw],
-                    'data_no': self.data_No,
-                    'timestamp': official_timestamp,
-                    'frame_time': official_timestamp
-                }
-                
-                # 50回に1回のみコンソール表示
-                if self.data_No % 50 == 0:
-                    print(f"[Frame {self.data_No}] Sending ID: {new_id}, GPS: ({gps_lat:.7f}, {gps_lon:.7f}, {gps_alt:.3f}), Local Pos: ({rel_x:.3f}, {rel_y:.3f}, {rel_z:.3f})")
-                
-            else:
-                # GPS変換失敗時のデータ
-                gps_data = {
-                    'status': 'GPS_CONVERSION_FAILED',
-                    'id': new_id,
-                    'error_message': 'GPS coordinate conversion failed',
-                    'ned_position': [ned_x, ned_y, ned_z],
-                    'ned_rotation': [ned_qw, ned_qx, ned_qy, ned_qz],
-                    'motive_position': [rel_x, rel_y, rel_z],
-                    'motive_rotation': [motive_qx, motive_qy, motive_qz, motive_qw],
-                    'data_no': self.data_No,
-                    'timestamp': official_timestamp,
-                    'frame_time': official_timestamp
-                }
-                
-                print(f"ERROR: GPS conversion failed for ID {new_id}")
+                # 単位変換
+                lat_e7 = int(gps_lat * 1e7)
+                lon_e7 = int(gps_lon * 1e7)
+                alt_mm = int(gps_alt * 1000)
+                yaw_cdeg = int(yaw_deg * 100)
+                unix_time_sec = time.time_ns() / 1e9
 
-            # **UDP送信実行（毎フレーム = 50Hz）**
-            if new_id in self.udp_targets:
+                # struct パック (23バイト固定長)
+                packed = struct.pack('<BiiiHd',
+                    new_id, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec)
+
                 target_ip = self.udp_targets[new_id]
-                
-                # 毎フレーム送信（50Hz）
-                success = self.send_udp_data(gps_data, target_ip, new_id)
-                
-                # 50回に1回のみ送信確認表示
+                success = self.send_udp_data(packed, target_ip)
+
                 if self.data_No % 50 == 0:
-                    print(f"[Frame {self.data_No}] GPS data sent to {target_ip} (50Hz)")
-                
+                    print(f"[Frame {self.data_No}] Struct data sent to {target_ip} (50Hz), GPS: ({gps_lat:.7f}, {gps_lon:.7f}, {gps_alt:.3f})")
+
                 if not success:
                     print(f"Failed to send UDP data for RB{new_id} to {target_ip}")
             else:
-                print(f"WARNING: No UDP target configured for rigid body {new_id}")
+                print(f"ERROR: GPS conversion failed for ID {new_id}")
 
             # データをバッファに格納（コンソール表示用）
             self.data_buffer[new_id] = {
@@ -1405,6 +1358,8 @@ class NatNetClient:
         try:
             self.command_socket.close()
             self.data_socket.close()
+            for sock in self.udp_sockets.values():
+                sock.close()
         except:
             pass
 
