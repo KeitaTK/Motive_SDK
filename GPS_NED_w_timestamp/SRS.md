@@ -204,9 +204,9 @@ def __unpack_rigid_body(self, ...):
     
     # struct パック (23バイト固定長)
     packed = struct.pack('<BiiiHd',
-        new_id, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec)
+        rigid_body_id, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec)
     
-    self.send_udp_data(packed, target_ip, new_id)
+    self.send_udp_data(packed, target_ip, rigid_body_id)
 ```
 
 ### 5.2 Raspi側
@@ -261,6 +261,8 @@ while True:
     data, addr = sock.recvfrom(4096)
     # struct.unpack: <B=uint8 rigid_body_id, i=int32 lat_e7, i=lon_e7, i=alt_mm,
     #                H=uint16 yaw_cdeg, d=float64 unix_time_sec
+    if len(data) < 23:
+        continue
     rigid_body_id, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec = \
         struct.unpack('<BiiiHd', data[:23])
     sender.update_data(lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec)
@@ -288,6 +290,8 @@ sock.bind(("0.0.0.0", 15769))
 
 while True:
     data, addr = sock.recvfrom(4096)
+    if len(data) < 23:
+        continue
     rigid_body_id, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec = \
         struct.unpack('<BiiiHd', data[:23])
     
@@ -318,7 +322,7 @@ while True:
 |------|------|
 | `udp_targets` | 剛体ID → 送信先IPアドレスのマッピング |
 | `udp_port` | UDP送信先ポート番号 |
-| `system_time_divider` | （予備。現在は未使用） |
+| `system_time_divider` | （予備。現在は未使用。将来的に削除予定） |
 | `recording_enabled` | `true` でCSV記録機能が有効化（`NatNetClient.__init__` で読み込み）。デフォルト: `false` |
 
 ---
@@ -327,7 +331,7 @@ while True:
 
 ```
 GPS_NED_w_timestamp/
-├── DESIGN.md          ← 本資料
+├── SRS.md             ← 本資料
 ├── README.md          ← 使用方法
 ├── config.json        ← 設定ファイル
 ├── PythonSample.py    ← エントリポイント（キーボード監視・記録制御）
