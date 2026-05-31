@@ -103,6 +103,13 @@ class NatNetClient:
         self.recording_data = []  # 記録データバッファ
         self.recording_start_time = None  # 記録開始時刻
 
+        # **フレームレート監視用変数**
+        self.fps_monitor_enabled = True
+        self.fps_monitor_window = 100  # 最初の100フレームで判定
+        self.fps_monitor_timestamps = []  # フレーム到着時刻 (time.time_ns())
+        self.fps_monitor_done = False  # 判定完了フラグ
+        self._fps_seen_frames = set()  # 重複収集防止用のフレーム番号セット
+
         # **GPS変換用の設定**
         self.D2R = math.pi / 180.0
         self.R2D = 180.0 / math.pi
@@ -124,6 +131,11 @@ class NatNetClient:
             # 記録機能の有効/無効
             self.recording_enabled = config.get("recording_enabled", False)
             self.udp_port = config.get("udp_port", 15769)
+            # フレームレート監視設定
+            self.fps_monitor_enabled = config.get("fps_monitor_enabled", True)
+            self.fps_monitor_window = config.get("fps_monitor_window", 100)
+            self.fps_expected = config.get("fps_expected", 50)
+            self.fps_tolerance_percent = config.get("fps_tolerance_percent", 20)
         except Exception as e:
             print(f"[警告] config.jsonの読み込みに失敗: {e}")
             self.udp_targets = {}
@@ -950,6 +962,13 @@ class NatNetClient:
         mocap_data.set_prefix_data(frame_prefix_data)
         frame_number = frame_prefix_data.frame_number
 
+        # フレームレート監視: 重複を避けてタイムスタンプ収集
+        if (self.fps_monitor_enabled and not self.fps_monitor_done
+                and frame_number not in self._fps_seen_frames):
+            self._fps_seen_frames.add(frame_number)
+            self.fps_monitor_timestamps.append(time.time_ns())
+            self._check_fps()
+
         #Markerset Data
         rel_offset, marker_set_data =self.__unpack_marker_set_data(data[offset:], (packet_size - offset),major, minor)
         offset += rel_offset
@@ -1070,6 +1089,32 @@ class NatNetClient:
             offset += len( message ) + 1
 
         return message_id
+
+    def _check_fps(self):
+        """フレームレート監視: 最初のNフレームの到着間隔から実測レートを計算し判定する"""
+        if len(self.fps_monitor_timestamps) >= self.fps_monitor_window and not self.fps_monitor_done:
+            self.fps_monitor_done = True
+            first_ts = self.fps_monitor_timestamps[0]
+            last_ts = self.fps_monitor_timestamps[-1]
+            duration_sec = (last_ts - first_ts) / 1e9
+            count = len(self.fps_monitor_timestamps) - 1  # インターバル数
+            measured_hz = count / duration_sec if duration_sec > 0 else 0
+
+            print(f"\n[FPS Monitor] 計測完了: {count}フレーム / {duration_sec:.3f}秒")
+            print(f"[FPS Monitor] 実測レート: {measured_hz:.1f} Hz (期待値: {self.fps_expected} Hz)")
+
+            # 許容範囲の計算
+            lower_bound = self.fps_expected * (1 - self.fps_tolerance_percent / 100.0)
+            upper_bound = self.fps_expected * (1 + self.fps_tolerance_percent / 100.0)
+
+            if measured_hz < lower_bound or measured_hz > upper_bound:
+                print(f"[FPS Monitor] ⚠ 警告: フレームレートが期待値({self.fps_expected}Hz)から大きく外れています!")
+                if measured_hz >= 90:
+                    print(f"[FPS Monitor] ⚠ Motive側が100Hz以上で出力している可能性があります。{self.fps_expected}Hzに設定してください。")
+                elif measured_hz >= 70:
+                    print(f"[FPS Monitor] ⚠ フレームレートが高めです。Motive設定を確認してください。")
+                elif measured_hz < 30:
+                    print(f"[FPS Monitor] ⚠ フレームレートが低すぎます。Motiveまたはネットワークを確認してください。")
 
     def __unpack_server_info(self, data, packet_size, major, minor):
         offset = 0

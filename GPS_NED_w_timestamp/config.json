@@ -5,5 +5,9 @@
     },
     "udp_port": 15769,
     "system_time_divider": 5,
-    "recording_enabled": true
+    "recording_enabled": true,
+    "fps_monitor_enabled": true,
+    "fps_monitor_window": 100,
+    "fps_expected": 50,
+    "fps_tolerance_percent": 20
 }
