@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import socket
 import struct
 from threading import Thread
@@ -109,6 +109,7 @@ class NatNetClient:
         self.fps_monitor_timestamps = []  # フレーム到着時刻 (time.time_ns())
         self.fps_monitor_done = False  # 判定完了フラグ
         self._fps_seen_frames = set()  # 重複収集防止用のフレーム番号セット
+        self._fps_id1_seen_this_frame = False  # 現在フレームでID 1を検出したか
 
         # **GPS変換用の設定**
         self.D2R = math.pi / 180.0
@@ -531,6 +532,10 @@ class NatNetClient:
 
         new_id = int.from_bytes( data[offset:offset+4], byteorder='little', signed=True )
         offset += 4
+
+        # FPS監視: ID 1 検出フラグ
+        if new_id == 1:
+            self._fps_id1_seen_this_frame = True
 
         trace_mf( "RB: %3.1d ID: %3.1d"% (rb_num, new_id))
 
@@ -962,13 +967,6 @@ class NatNetClient:
         mocap_data.set_prefix_data(frame_prefix_data)
         frame_number = frame_prefix_data.frame_number
 
-        # フレームレート監視: 重複を避けてタイムスタンプ収集
-        if (self.fps_monitor_enabled and not self.fps_monitor_done
-                and frame_number not in self._fps_seen_frames):
-            self._fps_seen_frames.add(frame_number)
-            self.fps_monitor_timestamps.append(time.time_ns())
-            self._check_fps()
-
         #Markerset Data
         rel_offset, marker_set_data =self.__unpack_marker_set_data(data[offset:], (packet_size - offset),major, minor)
         offset += rel_offset
@@ -988,6 +986,15 @@ class NatNetClient:
         offset += rel_offset
         mocap_data.set_rigid_body_data(rigid_body_data)
         rigid_body_count = rigid_body_data.get_rigid_body_count()
+
+        # フレームレート監視: ID 1が存在するフレームのみカウント
+        if (self.fps_monitor_enabled and not self.fps_monitor_done
+                and self._fps_id1_seen_this_frame
+                and frame_number not in self._fps_seen_frames):
+            self._fps_seen_frames.add(frame_number)
+            self.fps_monitor_timestamps.append(time.time_ns())
+            self._check_fps()
+        self._fps_id1_seen_this_frame = False  # フレーム毎にリセット
 
         # Skeleton Data
         rel_offset, skeleton_data = self.__unpack_skeleton_data(data[offset:], (packet_size - offset),major, minor)
