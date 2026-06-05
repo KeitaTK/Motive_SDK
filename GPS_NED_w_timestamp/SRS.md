@@ -357,7 +357,7 @@ SDKは Motive から受信した剛体の生データ（位置・姿勢）をCSV
 #### 保存先
 
 ```
-~/Downloads/record_YYYYMMDD_HHMMSS.csv
+G:\マイドライブ\LOGS_Pixhawk6c\record_YYYYMMDD_HHMMSS.csv
 ```
 
 記録開始時刻をファイル名に使用する（例: `record_20260531_143025.csv`）。
@@ -439,7 +439,7 @@ if self.is_recording:
 
 #### 記録停止とCSV保存 (`stop_recording`, L283-331)
 
-- `csv.writer` を使用して `~/Downloads/` にCSVファイルを出力
+- `csv.writer` を使用して `G:\マイドライブ\LOGS_Pixhawk6c\` にCSVファイルを出力
 - ファイル名は `record_YYYYMMDD_HHMMSS.csv`（開始時刻から生成）
 - 先頭行にヘッダーを書き込み、続けて全データ行を出力
 
