@@ -304,8 +304,8 @@ class NatNetClient:
             from datetime import datetime
             start_dt = datetime.fromtimestamp(self.recording_start_time)
             filename = start_dt.strftime("record_%Y%m%d_%H%M%S.csv")
-            # ダウンロードフォルダに保存
-            download_folder = os.path.expanduser("~/Downloads")
+            # LOGS_Pixhawk6c フォルダに保存
+            download_folder = r"G:\マイドライブ\LOGS_Pixhawk6c"
             filepath = os.path.join(download_folder, filename)
             
             print(f"[DEBUG] CSVファイル保存先: {filepath}")
