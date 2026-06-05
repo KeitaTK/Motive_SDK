@@ -146,12 +146,15 @@ class NatNetClient:
         # UDP統計情報
         self.udp_send_count = 0
         self.udp_error_count = 0
+        self._last_udp_send_ns_by_rb = {}
+        self._udp_min_interval_ns = int(1_000_000_000 / max(self.fps_expected, 1))
 
         print(f"GPS reference initialized: ({self.ref_lat:.7f}, {self.ref_lon:.7f}, {self.ref_alt:.3f})")
         print("UDP targets configured:")
         for rb_id, ip in self.udp_targets.items():
             print(f"  Rigid Body {rb_id} → {ip}:{self.udp_port}")
-        print("UDP sending at 50Hz (every frame), Console display every 50 frames")
+        print(f"UDP sending target rate: {self.fps_expected}Hz per rigid body")
+        print("Total packet count scales with the number of enabled rigid bodies")
 
         # Persist UDP sockets (one per target IP)
         self.udp_sockets = {}
@@ -593,25 +596,35 @@ class NatNetClient:
 
             # structバイナリ生成とUDP送信
             if gps_lat is not None:
-                # 単位変換
-                lat_e7 = int(gps_lat * 1e7)
-                lon_e7 = int(gps_lon * 1e7)
-                alt_mm = int(gps_alt * 1000)
-                yaw_cdeg = int(yaw_deg * 100)
-                unix_time_sec = time.time_ns() / 1e9
+                now_ns = time.time_ns()
+                last_send_ns = self._last_udp_send_ns_by_rb.get(new_id)
+                should_send = (
+                    last_send_ns is None or
+                    (now_ns - last_send_ns) >= self._udp_min_interval_ns
+                )
 
-                # struct パック (23バイト固定長)
-                packed = struct.pack('<BiiiHd',
-                    new_id, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec)
+                if should_send:
+                    self._last_udp_send_ns_by_rb[new_id] = now_ns
 
-                target_ip = self.udp_targets[new_id]
-                success = self.send_udp_data(packed, target_ip)
+                    # 単位変換
+                    lat_e7 = int(gps_lat * 1e7)
+                    lon_e7 = int(gps_lon * 1e7)
+                    alt_mm = int(gps_alt * 1000)
+                    yaw_cdeg = int(yaw_deg * 100)
+                    unix_time_sec = time.time_ns() / 1e9
 
-                if self.data_No % 50 == 0:
-                    print(f"[Frame {self.data_No}] Struct data sent to {target_ip} (50Hz), GPS: ({gps_lat:.7f}, {gps_lon:.7f}, {gps_alt:.3f})")
+                    # struct パック (23バイト固定長)
+                    packed = struct.pack('<BiiiHd',
+                        new_id, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec)
 
-                if not success:
-                    print(f"Failed to send UDP data for RB{new_id} to {target_ip}")
+                    target_ip = self.udp_targets[new_id]
+                    success = self.send_udp_data(packed, target_ip)
+
+                    if self.data_No % 50 == 0:
+                        print(f"[Frame {self.data_No}] Struct data sent to {target_ip} ({self.fps_expected}Hz target), GPS: ({gps_lat:.7f}, {gps_lon:.7f}, {gps_alt:.3f})")
+
+                    if not success:
+                        print(f"Failed to send UDP data for RB{new_id} to {target_ip}")
             else:
                 print(f"ERROR: GPS conversion failed for ID {new_id}")
 
@@ -1364,7 +1377,8 @@ class NatNetClient:
         print("UDP transmission targets:")
         for rb_id, ip in self.udp_targets.items():
             print(f"  Rigid Body {rb_id} → {ip}:{self.udp_port}")
-        print("UDP sending at 50Hz (every frame), Console display every 50 frames")
+        print(f"UDP sending target rate: {self.fps_expected}Hz per rigid body")
+        print("Total packet count scales with the number of enabled rigid bodies")
         print("Waiting for rigid body data from Motive...")
         print("Press Ctrl+C to stop\n")
 
