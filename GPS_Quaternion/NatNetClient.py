@@ -613,9 +613,11 @@ class NatNetClient:
                     yaw_cdeg = int(yaw_deg * 100)
                     unix_time_sec = time.time_ns() / 1e9
 
-                    # struct パック (23バイト固定長)
-                    packed = struct.pack('<BiiiHd',
-                        new_id, lat_e7, lon_e7, alt_mm, yaw_cdeg, unix_time_sec)
+                    # struct パック (39バイト固定長): qx,qy,qz,qw (各float 4バイト) を追加
+                    packed = struct.pack('<BiiiHffffd',
+                        new_id, lat_e7, lon_e7, alt_mm, yaw_cdeg,
+                        motive_qx, motive_qy, motive_qz, motive_qw,
+                        unix_time_sec)
 
                     target_ip = self.udp_targets[new_id]
                     success = self.send_udp_data(packed, target_ip)
