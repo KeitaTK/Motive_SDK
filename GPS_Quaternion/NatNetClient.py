@@ -131,6 +131,7 @@ class NatNetClient:
             self.udp_targets = {int(k): v for k, v in udp_targets_dict.items()}
             # 記録機能の有効/無効
             self.recording_enabled = config.get("recording_enabled", False)
+            self.recording_directory = config.get("recording_directory", "")
             self.udp_port = config.get("udp_port", 15769)
             # フレームレート監視設定
             self.fps_monitor_enabled = config.get("fps_monitor_enabled", True)
@@ -141,6 +142,7 @@ class NatNetClient:
             print(f"[警告] config.jsonの読み込みに失敗: {e}")
             self.udp_targets = {}
             self.recording_enabled = False
+            self.recording_directory = ""
             self.udp_port = 15769
         
         # UDP統計情報
@@ -308,9 +310,32 @@ class NatNetClient:
             from datetime import datetime
             start_dt = datetime.fromtimestamp(self.recording_start_time)
             filename = start_dt.strftime("record_%Y%m%d_%H%M%S.csv")
-            # LOGS_Pixhawk6c フォルダに保存
-            download_folder = r"G:\マイドライブ\LOGS_Pixhawk6c"
-            filepath = os.path.join(download_folder, filename)
+            # 保存先フォルダの決定と検証
+            download_folder = self.recording_directory
+            local_fallback_folder = os.path.join(os.path.dirname(__file__), "logs")
+            
+            if download_folder:
+                # 相対パスの場合は絶対パスに解決
+                if not os.path.isabs(download_folder):
+                    download_folder = os.path.abspath(os.path.join(os.path.dirname(__file__), download_folder))
+            else:
+                download_folder = local_fallback_folder
+                
+            # ディレクトリの作成と書き込みテスト
+            try:
+                os.makedirs(download_folder, exist_ok=True)
+                filepath = os.path.join(download_folder, filename)
+                # 実際に書き込み可能かテスト
+                test_file = os.path.join(download_folder, ".write_test")
+                with open(test_file, "w") as f:
+                    f.write("")
+                os.remove(test_file)
+            except Exception as e:
+                print(f"[警告] 設定された保存先 '{download_folder}' への書き込みができませんでした: {e}")
+                print(f"スクリプト位置の '{local_fallback_folder}' に保存します。")
+                download_folder = local_fallback_folder
+                os.makedirs(download_folder, exist_ok=True)
+                filepath = os.path.join(download_folder, filename)
             
             print(f"[DEBUG] CSVファイル保存先: {filepath}")
             

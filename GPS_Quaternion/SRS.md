@@ -439,7 +439,10 @@ if self.is_recording:
 
 #### 記録停止とCSV保存 (`stop_recording`, L283-331)
 
-- `csv.writer` を使用して `G:\マイドライブ\LOGS_Pixhawk6c\` にCSVファイルを出力
+- 設定ファイル `config.json` の `"recording_directory"` から指定された保存先パスを読み込み、CSVファイルを出力する
+- パスが未設定（空文字列など）の場合は、スクリプトと同じディレクトリの `logs` フォルダをデフォルト保存先とする
+- 設定されたフォルダへの書き込みテスト（ダミーファイルの作成）を行い、失敗した場合（他PCでの実行時に設定ドライブが存在しない場合など）は自動でスクリプト位置の `logs` フォルダにフォールバックして保存する
+- ディレクトリが存在しない場合は自動で新規作成する
 - ファイル名は `record_YYYYMMDD_HHMMSS.csv`（開始時刻から生成）
 - 先頭行にヘッダーを書き込み、続けて全データ行を出力
 
@@ -458,6 +461,7 @@ CSV 記録は UDP 送信とは独立して動作し、互いに影響しない�
 
 | 日付 | 変更内容 |
 |------|---------|
+| 2026-07-05 | CSV座標データの保存先を `config.json` から設定できるように変更。他PC環境での実行も考慮し、指定フォルダが書き込み不可能な場合は自動的にスクリプト位置の `logs/` フォルダにフォールバックして保存する機能を追加。 |
 | 2026-05-31 | UDP通信をpickleからstruct 23byte固定長バイナリに変更。GPS座標変換(SDK側で`ned_to_gps()` → `lat_e7/lon_e7/alt_mm`)、`unix_time_sec`をstructに埋め込み。Raspi→FC周期をGPS_INPUT 15Hz/SYSTEM_TIME 15Hz(間引きなし)に統一。SYSTEM_TIMEは独立パケット廃止しstruct埋め込み。§4.2のタイトルと説明を実装仕様に変更。config.jsonの`system_time_divider`を予備扱いに変更。 |
 | 2026-05-31 | Enterキー操作を3ステートトグルから2ステートトグルに簡略化（全0行マーカー廃止、Enterごとに新規CSV生成）。CSVサンプルのtimestampを time.time_ns() 整数形式に修正 |
 | 2026-05-31 | CSV記録の timestamp を Motive公式タイムスタンプから SDK生成(`time.time_ns()`) に修正（Motiveがタイムスタンプを送信しない実装に合わせた設計変更） |
